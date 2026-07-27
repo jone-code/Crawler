@@ -19,9 +19,17 @@ class XiaohongshuCrawler(BaseCrawler):
             (maxItems) => {
               const normalizeUrl = (value) => {
                 if (!value) return null;
-                if (value.startsWith("//")) return `https:${value}`;
-                if (value.startsWith("/")) return `https://www.xiaohongshu.com${value}`;
-                return value;
+                let resolved = value;
+                if (value.startsWith("//")) resolved = `https:${value}`;
+                if (value.startsWith("/")) resolved = `https://www.xiaohongshu.com${value}`;
+                try {
+                  const parsed = new URL(resolved);
+                  parsed.search = "";
+                  parsed.hash = "";
+                  return parsed.toString();
+                } catch {
+                  return resolved;
+                }
               };
 
               const unique = new Map();
@@ -33,7 +41,12 @@ class XiaohongshuCrawler(BaseCrawler):
 
                 const titleNode = link.querySelector("img[alt], [class*='title'], [class*='desc']");
                 const text = (link.innerText || "").trim();
-                const title = titleNode?.getAttribute?.("alt") || text.split("\\n")[0] || null;
+                const title =
+                  titleNode?.getAttribute?.("alt") ||
+                  link.getAttribute("title") ||
+                  link.getAttribute("aria-label") ||
+                  text.split("\\n")[0] ||
+                  null;
                 const cover = normalizeUrl(link.querySelector("img")?.getAttribute("src") || null);
 
                 unique.set(href, {
@@ -88,6 +101,12 @@ class XiaohongshuCrawler(BaseCrawler):
             previous_height = current_height
 
     async def _extract_creator_name(self, page: Page) -> str | None:
+        page_title = (await page.title()).strip()
+        if page_title and " - " in page_title:
+            primary = page_title.split(" - ")[0].strip()
+            if primary and primary not in {"小红书"}:
+                return primary
+
         selectors = [
             "meta[property='og:title']",
             "h1",

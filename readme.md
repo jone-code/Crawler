@@ -89,4 +89,5 @@ Cookie file format should be a JSON array compatible with Playwright `context.ad
 ## Notes
 
 - Target websites can change page structure and anti-bot rules at any time.
+- Douyin creator pages often require login/verification, so use `--cookies` for stable results.
 - For stable production crawling, combine browser automation with request-level API parsing and retry strategy.

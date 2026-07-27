@@ -19,9 +19,17 @@ class DouyinCrawler(BaseCrawler):
             (maxItems) => {
               const normalizeUrl = (value) => {
                 if (!value) return null;
-                if (value.startsWith("//")) return `https:${value}`;
-                if (value.startsWith("/")) return `https://www.douyin.com${value}`;
-                return value;
+                let resolved = value;
+                if (value.startsWith("//")) resolved = `https:${value}`;
+                if (value.startsWith("/")) resolved = `https://www.douyin.com${value}`;
+                try {
+                  const parsed = new URL(resolved);
+                  parsed.search = "";
+                  parsed.hash = "";
+                  return parsed.toString();
+                } catch {
+                  return resolved;
+                }
               };
 
               const unique = new Map();
@@ -42,6 +50,23 @@ class DouyinCrawler(BaseCrawler):
                 });
                 if (unique.size >= maxItems) break;
               }
+
+              if (unique.size === 0) {
+                const html = document.documentElement.innerHTML;
+                const matches = html.match(/https?:\\/\\/www\\.douyin\\.com\\/(?:video|note)\\/[0-9]+/g) || [];
+                for (const hit of matches) {
+                  const href = normalizeUrl(hit);
+                  if (!href || unique.has(href)) continue;
+                  unique.set(href, {
+                    post_url: href,
+                    title: null,
+                    description: null,
+                    cover_url: null,
+                  });
+                  if (unique.size >= maxItems) break;
+                }
+              }
+
               return Array.from(unique.values());
             }
             """,
@@ -86,6 +111,14 @@ class DouyinCrawler(BaseCrawler):
             previous_height = current_height
 
     async def _extract_creator_name(self, page: Page) -> str | None:
+        page_title = (await page.title()).strip()
+        if page_title:
+            candidates = page_title.split(" - ")
+            if candidates:
+                primary = candidates[0].strip()
+                if primary and primary not in {"的抖音", "抖音"}:
+                    return primary
+
         selectors = [
             "meta[property='og:title']",
             "h1",
