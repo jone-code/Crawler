@@ -10,7 +10,7 @@ This project crawls creator post lists from:
 - Unified output schema for different platforms
 - Crawl creator profile page and extract post links
 - Optional cookie injection for logged-in session crawling
-- CLI output as JSON (stdout or file)
+- Python API for async/sync integration
 
 ## Environment
 
@@ -28,33 +28,40 @@ python -m playwright install chromium
 
 ## Usage
 
-### Xiaohongshu
+### Synchronous Call
 
-```bash
-python src/main.py \
-  --platform xiaohongshu \
-  --url "https://www.xiaohongshu.com/user/profile/<creator_id>" \
-  --max-items 20 \
-  --output output/xiaohongshu.json
+```python
+from src import crawl_creator_sync
+
+result = crawl_creator_sync(
+    platform="xiaohongshu",
+    creator_url="https://www.xiaohongshu.com/user/profile/<creator_id>",
+    max_items=20,
+    cookies_path=None,
+)
+
+print(result)
 ```
 
-### Douyin
+### Asynchronous Call
 
-```bash
-python src/main.py \
-  --platform douyin \
-  --url "https://www.douyin.com/user/<creator_id>" \
-  --max-items 20 \
-  --output output/douyin.json
-```
+```python
+import asyncio
 
-### With Cookies (Optional)
+from src import crawl_creator
 
-```bash
-python src/main.py \
-  --platform douyin \
-  --url "https://www.douyin.com/user/<creator_id>" \
-  --cookies cookies/douyin.cookies.json
+
+async def run():
+    result = await crawl_creator(
+        platform="douyin",
+        creator_url="https://www.douyin.com/user/<creator_id>",
+        max_items=20,
+        cookies_path="cookies/douyin.cookies.json",
+    )
+    print(result)
+
+
+asyncio.run(run())
 ```
 
 Cookie file format should be a JSON array compatible with Playwright `context.add_cookies`.
@@ -89,5 +96,5 @@ Cookie file format should be a JSON array compatible with Playwright `context.ad
 ## Notes
 
 - Target websites can change page structure and anti-bot rules at any time.
-- Douyin creator pages often require login/verification, so use `--cookies` for stable results.
+- Douyin creator pages often require login/verification, so pass `cookies_path` for stable results.
 - For stable production crawling, combine browser automation with request-level API parsing and retry strategy.
