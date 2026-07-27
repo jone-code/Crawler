@@ -16,6 +16,22 @@ def init_sqlite_db(db_path: str = DEFAULT_DB_PATH) -> None:
         conn.execute("PRAGMA foreign_keys = ON;")
         conn.executescript(
             """
+            CREATE TABLE IF NOT EXISTS creators (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform TEXT NOT NULL,
+                creator_id TEXT NOT NULL,
+                creator_url TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                last_crawl_time_utc TEXT,
+                created_at_utc TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at_utc TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(platform, creator_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_creators_platform_enabled
+              ON creators(platform, enabled);
+
             CREATE TABLE IF NOT EXISTS crawl_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 platform TEXT NOT NULL,
@@ -140,4 +156,145 @@ def save_creator_content(payload: dict[str, Any], db_path: str = DEFAULT_DB_PATH
         "db_path": db_path,
         "run_id": run_id,
         "saved_posts": len(posts),
+    }
+
+
+def register_creator(
+    *,
+    platform: str,
+    creator_id: str,
+    creator_url: str,
+    db_path: str = DEFAULT_DB_PATH,
+    enabled: bool = True,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if not creator_id.strip():
+        raise ValueError("creator_id cannot be empty")
+    if not creator_url.strip():
+        raise ValueError("creator_url cannot be empty")
+
+    init_sqlite_db(db_path=db_path)
+    metadata_payload = metadata or {}
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO creators (
+                platform,
+                creator_id,
+                creator_url,
+                enabled,
+                metadata_json
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(platform, creator_id) DO UPDATE SET
+                creator_url = excluded.creator_url,
+                enabled = excluded.enabled,
+                metadata_json = excluded.metadata_json,
+                updated_at_utc = datetime('now')
+            """,
+            (
+                platform,
+                creator_id,
+                creator_url,
+                1 if enabled else 0,
+                json.dumps(metadata_payload, ensure_ascii=False),
+            ),
+        )
+        row = conn.execute(
+            """
+            SELECT
+                id,
+                platform,
+                creator_id,
+                creator_url,
+                enabled,
+                metadata_json,
+                last_crawl_time_utc,
+                created_at_utc,
+                updated_at_utc
+            FROM creators
+            WHERE platform = ? AND creator_id = ?
+            """,
+            (platform, creator_id),
+        ).fetchone()
+
+    if row is None:
+        raise RuntimeError("failed to register creator")
+    return _creator_row_to_dict(row)
+
+
+def list_creators(
+    *,
+    db_path: str = DEFAULT_DB_PATH,
+    platform: str | None = None,
+    enabled_only: bool = False,
+) -> list[dict[str, Any]]:
+    init_sqlite_db(db_path=db_path)
+    query = """
+        SELECT
+            id,
+            platform,
+            creator_id,
+            creator_url,
+            enabled,
+            metadata_json,
+            last_crawl_time_utc,
+            created_at_utc,
+            updated_at_utc
+        FROM creators
+    """
+    filters: list[str] = []
+    params: list[Any] = []
+    if platform:
+        filters.append("platform = ?")
+        params.append(platform)
+    if enabled_only:
+        filters.append("enabled = 1")
+    if filters:
+        query += " WHERE " + " AND ".join(filters)
+    query += " ORDER BY id DESC"
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [_creator_row_to_dict(row) for row in rows]
+
+
+def mark_creator_crawled(
+    *,
+    platform: str,
+    creator_id: str,
+    crawl_time_utc: str,
+    db_path: str = DEFAULT_DB_PATH,
+) -> None:
+    init_sqlite_db(db_path=db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE creators
+            SET
+                last_crawl_time_utc = ?,
+                updated_at_utc = datetime('now')
+            WHERE platform = ? AND creator_id = ?
+            """,
+            (crawl_time_utc, platform, creator_id),
+        )
+        conn.commit()
+
+
+def _creator_row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
+    metadata_text = row[5] if isinstance(row[5], str) else "{}"
+    try:
+        metadata = json.loads(metadata_text)
+    except json.JSONDecodeError:
+        metadata = {}
+
+    return {
+        "id": row[0],
+        "platform": row[1],
+        "creator_id": row[2],
+        "creator_url": row[3],
+        "enabled": bool(row[4]),
+        "metadata": metadata,
+        "last_crawl_time_utc": row[6],
+        "created_at_utc": row[7],
+        "updated_at_utc": row[8],
     }

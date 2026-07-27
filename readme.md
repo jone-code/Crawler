@@ -12,6 +12,7 @@ This project crawls creator post lists from:
 - Optional cookie injection for logged-in session crawling
 - Python API for async/sync integration
 - SQLite persistence for crawl runs and posts
+- Backend creator-id registry (add/list creators)
 
 ## Environment
 
@@ -83,6 +84,31 @@ result = crawl_creator_and_store_sync(
 print(result["storage"])
 ```
 
+### Backend: Add Creator ID and Crawl by ID
+
+```python
+from src import add_creator_id, crawl_creator_by_id_and_store_sync, list_creator_ids
+
+DB_PATH = "data/crawler.db"
+
+add_creator_id(
+    platform="xiaohongshu",
+    creator_id="<creator_id>",
+    db_path=DB_PATH,
+    metadata={"source": "admin-panel"},
+)
+
+result = crawl_creator_by_id_and_store_sync(
+    platform="xiaohongshu",
+    creator_id="<creator_id>",
+    max_items=20,
+    db_path=DB_PATH,
+)
+
+print(result["storage"])
+print(list_creator_ids(db_path=DB_PATH, platform="xiaohongshu"))
+```
+
 ### Save Existing Payload to SQLite
 
 ```python
@@ -131,4 +157,5 @@ save_creator_content(payload, db_path="data/crawler.db")
 - Target websites can change page structure and anti-bot rules at any time.
 - Douyin creator pages often require login/verification, so pass `cookies_path` for stable results.
 - SQLite schema is auto-created on first write (`crawl_runs` and `posts` tables).
+- Creator registry table (`creators`) is also auto-created for backend id management.
 - For stable production crawling, combine browser automation with request-level API parsing and retry strategy.
