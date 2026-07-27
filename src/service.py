@@ -4,6 +4,7 @@ import asyncio
 from typing import Literal
 
 from .crawlers import DouyinCrawler, XiaohongshuCrawler
+from .storage import save_creator_content
 
 Platform = Literal["xiaohongshu", "douyin"]
 
@@ -53,5 +54,46 @@ def crawl_creator_sync(
             max_items=max_items,
             headless=headless,
             cookies_path=cookies_path,
+        )
+    )
+
+
+async def crawl_creator_and_store(
+    *,
+    platform: Platform,
+    creator_url: str,
+    max_items: int = 20,
+    headless: bool = True,
+    cookies_path: str | None = None,
+    db_path: str = "data/crawler.db",
+) -> dict:
+    payload = await crawl_creator(
+        platform=platform,
+        creator_url=creator_url,
+        max_items=max_items,
+        headless=headless,
+        cookies_path=cookies_path,
+    )
+    storage = save_creator_content(payload, db_path=db_path)
+    return {"crawl": payload, "storage": storage}
+
+
+def crawl_creator_and_store_sync(
+    *,
+    platform: Platform,
+    creator_url: str,
+    max_items: int = 20,
+    headless: bool = True,
+    cookies_path: str | None = None,
+    db_path: str = "data/crawler.db",
+) -> dict:
+    return asyncio.run(
+        crawl_creator_and_store(
+            platform=platform,
+            creator_url=creator_url,
+            max_items=max_items,
+            headless=headless,
+            cookies_path=cookies_path,
+            db_path=db_path,
         )
     )

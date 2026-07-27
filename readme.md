@@ -11,6 +11,7 @@ This project crawls creator post lists from:
 - Crawl creator profile page and extract post links
 - Optional cookie injection for logged-in session crawling
 - Python API for async/sync integration
+- SQLite persistence for crawl runs and posts
 
 ## Environment
 
@@ -66,6 +67,38 @@ asyncio.run(run())
 
 Cookie file format should be a JSON array compatible with Playwright `context.add_cookies`.
 
+### Crawl and Save to SQLite
+
+```python
+from src import crawl_creator_and_store_sync
+
+result = crawl_creator_and_store_sync(
+    platform="douyin",
+    creator_url="https://www.douyin.com/user/<creator_id>",
+    max_items=20,
+    cookies_path="cookies/douyin.cookies.json",
+    db_path="data/crawler.db",
+)
+
+print(result["storage"])
+```
+
+### Save Existing Payload to SQLite
+
+```python
+from src import save_creator_content
+
+payload = {
+    "platform": "xiaohongshu",
+    "creator_url": "https://www.xiaohongshu.com/user/profile/<creator_id>",
+    "creator_name": "demo",
+    "crawl_time_utc": "2026-07-27T14:00:00+00:00",
+    "posts": [],
+}
+
+save_creator_content(payload, db_path="data/crawler.db")
+```
+
 ## Output Example
 
 ```json
@@ -97,4 +130,5 @@ Cookie file format should be a JSON array compatible with Playwright `context.ad
 
 - Target websites can change page structure and anti-bot rules at any time.
 - Douyin creator pages often require login/verification, so pass `cookies_path` for stable results.
+- SQLite schema is auto-created on first write (`crawl_runs` and `posts` tables).
 - For stable production crawling, combine browser automation with request-level API parsing and retry strategy.
