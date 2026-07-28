@@ -114,6 +114,18 @@ def create_app(db_path: str | None = None) -> Flask:
                 ),
                 "success",
             )
+            session_meta = (
+                result.get("crawl", {})
+                .get("crawler_meta", {})
+                .get("session", {})
+            )
+            warnings = session_meta.get("warnings")
+            runtime_status = session_meta.get("runtime_status")
+            if isinstance(warnings, list):
+                for warning in warnings:
+                    flash(f"会话告警: {warning}", "error")
+            if runtime_status in {"limited", "no_data"}:
+                flash(f"会话状态: {runtime_status}", "error")
             return redirect(url_for("run_detail", run_id=run_id))
         except Exception as exc:  # noqa: BLE001
             flash(f"抓取失败: {exc}", "error")

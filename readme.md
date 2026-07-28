@@ -118,6 +118,7 @@ result = crawl_creator_by_id_and_store_sync(
     platform="xiaohongshu",
     creator_id="<creator_id>",
     max_items=20,  # set 0 for continuous deep pagination
+    use_checkpoint=True,  # resume from saved pagination checkpoint when max_items=0
     db_path=DB_PATH,
     download_media=True,
     media_root="data/media",
@@ -180,5 +181,8 @@ save_creator_content(payload, db_path="data/crawler.db")
 - Creator registry table (`creators`) is also auto-created for backend id management.
 - Media metadata is stored in `post_media`, and downloaded files are stored under `data/media/<platform>/<creator_id>/<post_id>/`.
 - Set `max_items=0` to enable continuous pagination probing (scroll until multiple rounds have no new posts).
+- For Xiaohongshu deep mode, `use_checkpoint=True` resumes from previous checkpoint to avoid re-scanning old pages.
+- Crawler metadata now includes session diagnostics (`crawler_meta.session`) and pagination diagnostics (`crawler_meta.pagination`).
+- Built-in retry/backoff and jitter delays are enabled to reduce transient anti-bot failures.
 - Diff data for each run is persisted in `crawl_diffs` and `crawl_diff_items`, and also returned in `result["storage"]["diff"]` (`new/updated/unchanged/missing`).
 - For stable production crawling, combine browser automation with request-level API parsing and retry strategy.

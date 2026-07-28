@@ -13,8 +13,16 @@ from .service import (
     list_creator_ids,
 )
 from .media_downloader import download_post_media
-from .storage import init_sqlite_db, list_creators, mark_creator_crawled, register_creator, save_creator_content
-from .storage import set_creator_enabled
+from .storage import (
+    get_crawl_checkpoint,
+    init_sqlite_db,
+    list_creators,
+    mark_creator_crawled,
+    register_creator,
+    save_creator_content,
+    set_creator_enabled,
+    upsert_crawl_checkpoint,
+)
 
 __all__ = [
     "create_crawler",
@@ -36,4 +44,6 @@ __all__ = [
     "list_creators",
     "mark_creator_crawled",
     "set_creator_enabled",
+    "get_crawl_checkpoint",
+    "upsert_crawl_checkpoint",
 ]

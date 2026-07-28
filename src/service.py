@@ -5,7 +5,14 @@ from typing import Literal
 
 from .crawlers import DouyinCrawler, XiaohongshuCrawler
 from .media_downloader import download_post_media
-from .storage import list_creators, mark_creator_crawled, register_creator, save_creator_content
+from .storage import (
+    get_crawl_checkpoint,
+    list_creators,
+    mark_creator_crawled,
+    register_creator,
+    save_creator_content,
+    upsert_crawl_checkpoint,
+)
 
 Platform = Literal["xiaohongshu", "douyin"]
 
@@ -40,13 +47,17 @@ async def crawl_creator(
     max_items: int = 20,
     headless: bool = True,
     cookies_path: str | None = None,
+    use_checkpoint: bool = True,
 ) -> dict:
+    checkpoint: dict | None = None
+    if platform == "xiaohongshu" and use_checkpoint and max_items == 0:
+        checkpoint = get_crawl_checkpoint(platform=platform, creator_url=creator_url)
     crawler = create_crawler(
         platform,
         headless=headless,
         cookies_path=cookies_path,
     )
-    result = await crawler.crawl(creator_url, max_items=max_items)
+    result = await crawler.crawl(creator_url, max_items=max_items, checkpoint=checkpoint)
     return result.to_dict()
 
 
@@ -57,6 +68,7 @@ def crawl_creator_sync(
     max_items: int = 20,
     headless: bool = True,
     cookies_path: str | None = None,
+    use_checkpoint: bool = True,
 ) -> dict:
     return asyncio.run(
         crawl_creator(
@@ -65,6 +77,7 @@ def crawl_creator_sync(
             max_items=max_items,
             headless=headless,
             cookies_path=cookies_path,
+            use_checkpoint=use_checkpoint,
         )
     )
 
@@ -109,6 +122,7 @@ async def crawl_creator_by_id(
     max_items: int = 20,
     headless: bool = True,
     cookies_path: str | None = None,
+    use_checkpoint: bool = True,
 ) -> dict:
     creator_url = build_creator_url(platform, creator_id)
     return await crawl_creator(
@@ -117,6 +131,7 @@ async def crawl_creator_by_id(
         max_items=max_items,
         headless=headless,
         cookies_path=cookies_path,
+        use_checkpoint=use_checkpoint,
     )
 
 
@@ -127,6 +142,7 @@ def crawl_creator_by_id_sync(
     max_items: int = 20,
     headless: bool = True,
     cookies_path: str | None = None,
+    use_checkpoint: bool = True,
 ) -> dict:
     return asyncio.run(
         crawl_creator_by_id(
@@ -135,6 +151,7 @@ def crawl_creator_by_id_sync(
             max_items=max_items,
             headless=headless,
             cookies_path=cookies_path,
+            use_checkpoint=use_checkpoint,
         )
     )
 
@@ -149,6 +166,7 @@ async def crawl_creator_and_store(
     db_path: str = "data/crawler.db",
     download_media: bool = False,
     media_root: str = "data/media",
+    use_checkpoint: bool = True,
 ) -> dict:
     payload = await crawl_creator(
         platform=platform,
@@ -156,11 +174,19 @@ async def crawl_creator_and_store(
         max_items=max_items,
         headless=headless,
         cookies_path=cookies_path,
+        use_checkpoint=use_checkpoint,
     )
     media_result: dict | None = None
     if download_media:
         media_result = download_post_media(payload, media_root=media_root)
     storage = save_creator_content(payload, db_path=db_path)
+    _update_checkpoint_after_run(
+        platform=platform,
+        creator_url=creator_url,
+        payload=payload,
+        db_path=db_path,
+        run_id=storage.get("run_id"),
+    )
     return {"crawl": payload, "storage": storage, "media": media_result}
 
 
@@ -174,6 +200,7 @@ def crawl_creator_and_store_sync(
     db_path: str = "data/crawler.db",
     download_media: bool = False,
     media_root: str = "data/media",
+    use_checkpoint: bool = True,
 ) -> dict:
     return asyncio.run(
         crawl_creator_and_store(
@@ -185,6 +212,7 @@ def crawl_creator_and_store_sync(
             db_path=db_path,
             download_media=download_media,
             media_root=media_root,
+            use_checkpoint=use_checkpoint,
         )
     )
 
@@ -199,6 +227,7 @@ async def crawl_creator_by_id_and_store(
     db_path: str = "data/crawler.db",
     download_media: bool = False,
     media_root: str = "data/media",
+    use_checkpoint: bool = True,
 ) -> dict:
     creator_url = build_creator_url(platform, creator_id)
     # Ensure backend creator registry has this id for later scheduling/management.
@@ -217,6 +246,7 @@ async def crawl_creator_by_id_and_store(
         db_path=db_path,
         download_media=download_media,
         media_root=media_root,
+        use_checkpoint=use_checkpoint,
     )
     crawl_time_utc = result["crawl"].get("crawl_time_utc")
     if isinstance(crawl_time_utc, str) and crawl_time_utc:
@@ -239,6 +269,7 @@ def crawl_creator_by_id_and_store_sync(
     db_path: str = "data/crawler.db",
     download_media: bool = False,
     media_root: str = "data/media",
+    use_checkpoint: bool = True,
 ) -> dict:
     return asyncio.run(
         crawl_creator_by_id_and_store(
@@ -250,5 +281,40 @@ def crawl_creator_by_id_and_store_sync(
             db_path=db_path,
             download_media=download_media,
             media_root=media_root,
+            use_checkpoint=use_checkpoint,
         )
+    )
+
+
+def _update_checkpoint_after_run(
+    *,
+    platform: Platform,
+    creator_url: str,
+    payload: dict,
+    db_path: str,
+    run_id: int | None,
+) -> None:
+    posts = payload.get("posts")
+    if not isinstance(posts, list):
+        return
+    post_urls: list[str] = []
+    for post in posts:
+        if not isinstance(post, dict):
+            continue
+        url = post.get("post_url")
+        if isinstance(url, str) and url.strip():
+            post_urls.append(url.strip())
+    if not post_urls:
+        return
+    checkpoint_payload = {
+        "known_recent_post_urls": post_urls[:20],
+        "last_seen_post_url": post_urls[0],
+        "crawl_time_utc": payload.get("crawl_time_utc"),
+    }
+    upsert_crawl_checkpoint(
+        platform=platform,
+        creator_url=creator_url,
+        checkpoint=checkpoint_payload,
+        db_path=db_path,
+        run_id=run_id if isinstance(run_id, int) else None,
     )

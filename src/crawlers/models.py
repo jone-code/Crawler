@@ -34,6 +34,7 @@ class CreatorContent:
     creator_name: str | None
     crawl_time_utc: str
     posts: list[CreatorPost]
+    crawler_meta: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def create(
@@ -43,6 +44,7 @@ class CreatorContent:
         creator_url: str,
         creator_name: str | None,
         posts: list[CreatorPost],
+        crawler_meta: dict[str, Any] | None = None,
     ) -> "CreatorContent":
         return cls(
             platform=platform,
@@ -50,6 +52,7 @@ class CreatorContent:
             creator_name=creator_name,
             crawl_time_utc=datetime.now(timezone.utc).isoformat(),
             posts=posts,
+            crawler_meta=crawler_meta or {},
         )
 
     def to_dict(self) -> dict[str, Any]:

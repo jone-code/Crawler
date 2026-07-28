@@ -11,7 +11,13 @@ from .models import CreatorContent, CreatorPost
 class DouyinCrawler(BaseCrawler):
     platform = "douyin"
 
-    async def _crawl_page(self, page: Page, creator_url: str, max_items: int) -> CreatorContent:
+    async def _crawl_page(
+        self,
+        page: Page,
+        creator_url: str,
+        max_items: int,
+        checkpoint: dict[str, str] | None = None,
+    ) -> CreatorContent:
         await self._auto_scroll(page, max_items=max_items)
         creator_name = await self._extract_creator_name(page)
         cards = await page.evaluate(
@@ -119,7 +125,7 @@ class DouyinCrawler(BaseCrawler):
             if target_count is not None and count >= target_count:
                 break
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await page.wait_for_timeout(1800)
+            await self._sleep_with_jitter()
             current_height = await page.evaluate("document.body.scrollHeight")
             if current_height <= previous_height and count <= previous_count:
                 stable_rounds += 1

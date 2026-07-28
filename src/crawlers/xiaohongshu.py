@@ -12,9 +12,22 @@ from .models import CreatorContent, CreatorPost
 class XiaohongshuCrawler(BaseCrawler):
     platform = "xiaohongshu"
 
-    async def _crawl_page(self, page: Page, creator_url: str, max_items: int) -> CreatorContent:
-        cards = await self._collect_cards_with_pagination(page, max_items=max_items)
+    async def _crawl_page(
+        self,
+        page: Page,
+        creator_url: str,
+        max_items: int,
+        checkpoint: dict[str, Any] | None = None,
+    ) -> CreatorContent:
+        cards, pagination_meta = await self._collect_cards_with_pagination(
+            page, max_items=max_items, checkpoint=checkpoint
+        )
         creator_name = await self._extract_creator_name(page)
+        self.crawler_meta["pagination"] = pagination_meta
+        self._update_session_runtime_status(
+            cards_count=len(cards),
+            page_title=(await page.title()).strip(),
+        )
 
         posts = [
             CreatorPost(
@@ -42,22 +55,48 @@ class XiaohongshuCrawler(BaseCrawler):
             creator_url=creator_url,
             creator_name=creator_name,
             posts=posts,
+            crawler_meta=self.crawler_meta,
         )
 
     async def _collect_cards_with_pagination(
-        self, page: Page, *, max_items: int
-    ) -> list[dict[str, Any]]:
+        self, page: Page, *, max_items: int, checkpoint: dict[str, Any] | None
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         target_count = max_items if max_items > 0 else None
         cards_map: dict[str, dict[str, Any]] = {}
         previous_height = -1
         previous_total = 0
         stable_rounds = 0
+        anti_bot_events = 0
+        rounds = 0
+        stop_reason = "unknown"
+
+        known_recent_urls: set[str] = set()
+        if isinstance(checkpoint, dict):
+            urls = checkpoint.get("known_recent_post_urls")
+            if isinstance(urls, list):
+                for item in urls:
+                    if isinstance(item, str) and item.strip():
+                        known_recent_urls.add(item.strip())
+        checkpoint_hit = False
 
         for _ in range(120):
+            rounds += 1
             visible_cards = await self._extract_visible_cards(page)
+            if not visible_cards and await self._looks_access_limited(page):
+                anti_bot_events += 1
+                self.crawler_meta["retry"]["errors"].append(
+                    f"access limited during pagination round={rounds}"
+                )
+                if anti_bot_events <= self.max_retry_attempts:
+                    await page.reload(wait_until="domcontentloaded", timeout=self.timeout_ms)
+                    await self._sleep_with_jitter()
+                    continue
             for card in visible_cards:
                 post_url = card.get("post_url")
                 if not isinstance(post_url, str) or not post_url:
+                    continue
+                if known_recent_urls and post_url in known_recent_urls:
+                    checkpoint_hit = True
                     continue
                 existing = cards_map.get(post_url)
                 if existing is None:
@@ -66,10 +105,14 @@ class XiaohongshuCrawler(BaseCrawler):
                     cards_map[post_url] = self._merge_card(existing, card)
 
             if target_count is not None and len(cards_map) >= target_count:
+                stop_reason = "target_reached"
+                break
+            if target_count is None and known_recent_urls and checkpoint_hit and cards_map:
+                stop_reason = "checkpoint_hit"
                 break
 
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await page.wait_for_timeout(1800)
+            await self._sleep_with_jitter()
             current_height = await page.evaluate("document.body.scrollHeight")
             current_total = len(cards_map)
 
@@ -78,15 +121,30 @@ class XiaohongshuCrawler(BaseCrawler):
             else:
                 stable_rounds = 0
             if stable_rounds >= 5:
+                stop_reason = "stable_rounds_exceeded"
                 break
 
             previous_height = current_height
             previous_total = current_total
+        else:
+            stop_reason = "max_rounds_reached"
 
         cards = list(cards_map.values())
+        if stop_reason == "unknown":
+            stop_reason = "finished"
         if target_count is not None:
-            return cards[:target_count]
-        return cards
+            cards = cards[:target_count]
+        pagination_meta = {
+            "rounds": rounds,
+            "collected_cards": len(cards),
+            "checkpoint_used": bool(known_recent_urls),
+            "checkpoint_hit": checkpoint_hit,
+            "known_recent_post_urls": list(known_recent_urls)[:10],
+            "anti_bot_events": anti_bot_events,
+            "partial_crawl": bool(known_recent_urls),
+            "stop_reason": stop_reason,
+        }
+        return cards, pagination_meta
 
     async def _extract_visible_cards(self, page: Page) -> list[dict[str, Any]]:
         return await page.evaluate(
@@ -175,6 +233,21 @@ class XiaohongshuCrawler(BaseCrawler):
             merged["card_text_lines"] = incoming["card_text_lines"]
         return merged
 
+    async def _looks_access_limited(self, page: Page) -> bool:
+        return await page.evaluate(
+            r"""
+            () => {
+              const title = (document.title || "").trim();
+              const generic = title === "小红书 - 你的生活兴趣社区" || title === "小红书";
+              const hasLoginHints = /(登录|扫码登录|注册)/.test(document.body?.innerText || "");
+              const realExploreLinks = Array.from(document.querySelectorAll("a[href*='/explore/']")).filter(
+                (a) => /\/explore\/[a-zA-Z0-9]+/.test(a.getAttribute("href") || "")
+              );
+              return generic && (hasLoginHints || realExploreLinks.length === 0);
+            }
+            """
+        )
+
     async def _extract_creator_name(self, page: Page) -> str | None:
         page_title = (await page.title()).strip()
         if page_title and " - " in page_title:
@@ -216,8 +289,50 @@ class XiaohongshuCrawler(BaseCrawler):
                 continue
 
             try:
+                details = await self._fetch_detail_with_retry(page, detail_url)
+            except Exception as exc:  # noqa: BLE001
+                post.raw["detail_error"] = str(exc)
+                continue
+
+            title = self._clean_title(details.get("title"))
+            description = self._clean_description(details.get("description"))
+            cover_url = self._normalize_cover_url(details.get("cover_url"))
+            publish_time = details.get("publish_time")
+            page_title = self._clean_title(details.get("page_title"))
+            image_urls = self._normalize_urls(details.get("image_urls"))
+            video_urls = self._normalize_urls(details.get("video_urls"))
+            media_assets = self._normalize_media_assets(details.get("media_assets"))
+
+            if title:
+                post.title = title
+            elif page_title:
+                post.title = page_title
+
+            if description and description != "3 亿人的生活经验，都在小红书":
+                post.description = description
+
+            if cover_url:
+                post.cover_url = cover_url
+
+            if isinstance(publish_time, str) and publish_time.strip():
+                post.publish_time = publish_time.strip()
+
+            if image_urls:
+                post.image_urls = image_urls
+            if video_urls:
+                post.video_urls = video_urls
+            if media_assets:
+                post.media_assets = media_assets
+
+            post.raw["detail_url"] = detail_url
+            post.raw["detail_meta"] = details
+
+    async def _fetch_detail_with_retry(self, page: Page, detail_url: str) -> dict[str, Any]:
+        last_details: dict[str, Any] = {}
+        for attempt in range(1, self.max_retry_attempts + 1):
+            try:
                 await page.goto(detail_url, wait_until="domcontentloaded", timeout=self.timeout_ms)
-                await page.wait_for_timeout(1400)
+                await self._sleep_with_jitter()
                 details = await page.evaluate(
                     """
                     () => {
@@ -382,42 +497,49 @@ class XiaohongshuCrawler(BaseCrawler):
                     }
                     """
                 )
+                last_details = details
+                if not self._is_detail_limited(details):
+                    return details
+                self.crawler_meta["retry"]["errors"].append(
+                    f"detail limited attempt={attempt} url={detail_url}"
+                )
+                if attempt < self.max_retry_attempts:
+                    await page.wait_for_timeout(
+                        int(self.retry_backoff_seconds * 1000 * attempt)
+                    )
             except Exception as exc:  # noqa: BLE001
-                post.raw["detail_error"] = str(exc)
-                continue
+                self.crawler_meta["retry"]["errors"].append(
+                    f"detail fetch error attempt={attempt} url={detail_url} error={exc}"
+                )
+                if attempt >= self.max_retry_attempts:
+                    raise
+                await page.wait_for_timeout(int(self.retry_backoff_seconds * 1000 * attempt))
+        return last_details
 
-            title = self._clean_title(details.get("title"))
-            description = self._clean_description(details.get("description"))
-            cover_url = self._normalize_cover_url(details.get("cover_url"))
-            publish_time = details.get("publish_time")
-            page_title = self._clean_title(details.get("page_title"))
-            image_urls = self._normalize_urls(details.get("image_urls"))
-            video_urls = self._normalize_urls(details.get("video_urls"))
-            media_assets = self._normalize_media_assets(details.get("media_assets"))
+    def _is_detail_limited(self, details: dict[str, Any]) -> bool:
+        title = self._clean_title(details.get("title"))
+        description = self._clean_description(details.get("description"))
+        page_title = self._clean_title(details.get("page_title"))
+        has_media = bool(details.get("image_urls") or details.get("video_urls"))
+        return not any([title, description, page_title, has_media])
 
-            if title:
-                post.title = title
-            elif page_title:
-                post.title = page_title
-
-            if description and description != "3 亿人的生活经验，都在小红书":
-                post.description = description
-
-            if cover_url:
-                post.cover_url = cover_url
-
-            if isinstance(publish_time, str) and publish_time.strip():
-                post.publish_time = publish_time.strip()
-
-            if image_urls:
-                post.image_urls = image_urls
-            if video_urls:
-                post.video_urls = video_urls
-            if media_assets:
-                post.media_assets = media_assets
-
-            post.raw["detail_url"] = detail_url
-            post.raw["detail_meta"] = details
+    def _update_session_runtime_status(self, *, cards_count: int, page_title: str) -> None:
+        session = self.crawler_meta.get("session", {})
+        warnings = session.get("warnings")
+        if not isinstance(warnings, list):
+            warnings = []
+            session["warnings"] = warnings
+        if cards_count > 0:
+            session["runtime_status"] = "ok"
+        elif page_title in {"小红书", "小红书 - 你的生活兴趣社区"}:
+            session["runtime_status"] = "limited"
+            warnings.append("runtime indicates access limited")
+        else:
+            session["runtime_status"] = "no_data"
+        if warnings:
+            deduped = list(dict.fromkeys(str(item) for item in warnings))
+            session["warnings"] = deduped
+        self.crawler_meta["session"] = session
 
     def _parse_count(self, value: Any) -> int | None:
         if not isinstance(value, str):

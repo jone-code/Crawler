@@ -32,6 +32,19 @@ def init_sqlite_db(db_path: str = DEFAULT_DB_PATH) -> None:
             CREATE INDEX IF NOT EXISTS idx_creators_platform_enabled
               ON creators(platform, enabled);
 
+            CREATE TABLE IF NOT EXISTS crawl_checkpoints (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform TEXT NOT NULL,
+                creator_url TEXT NOT NULL,
+                checkpoint_json TEXT NOT NULL,
+                last_run_id INTEGER,
+                updated_at_utc TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(platform, creator_url)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_crawl_checkpoints_platform_creator
+              ON crawl_checkpoints(platform, creator_url);
+
             CREATE TABLE IF NOT EXISTS crawl_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 platform TEXT NOT NULL,
@@ -134,8 +147,15 @@ def save_creator_content(payload: dict[str, Any], db_path: str = DEFAULT_DB_PATH
         conn.execute("PRAGMA foreign_keys = ON;")
         platform = str(payload.get("platform") or "")
         creator_url = str(payload.get("creator_url") or "")
+        crawler_meta = payload.get("crawler_meta")
+        pagination_meta = crawler_meta.get("pagination", {}) if isinstance(crawler_meta, dict) else {}
+        partial_crawl = bool(pagination_meta.get("partial_crawl")) if isinstance(pagination_meta, dict) else False
         existing_posts = _fetch_existing_posts(conn, platform=platform, creator_url=creator_url)
-        diff_result = _compute_post_diff(existing_posts=existing_posts, incoming_posts=posts)
+        diff_result = _compute_post_diff(
+            existing_posts=existing_posts,
+            incoming_posts=posts,
+            include_missing=not partial_crawl,
+        )
 
         cursor = conn.execute(
             """
@@ -371,6 +391,65 @@ def set_creator_enabled(
         conn.commit()
 
 
+def get_crawl_checkpoint(
+    *,
+    platform: str,
+    creator_url: str,
+    db_path: str = DEFAULT_DB_PATH,
+) -> dict[str, Any] | None:
+    init_sqlite_db(db_path=db_path)
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT checkpoint_json, last_run_id, updated_at_utc
+            FROM crawl_checkpoints
+            WHERE platform = ? AND creator_url = ?
+            """,
+            (platform, creator_url),
+        ).fetchone()
+    if row is None:
+        return None
+    payload = _safe_json_loads(row[0])
+    if not isinstance(payload, dict):
+        payload = {}
+    payload["last_run_id"] = row[1]
+    payload["updated_at_utc"] = row[2]
+    return payload
+
+
+def upsert_crawl_checkpoint(
+    *,
+    platform: str,
+    creator_url: str,
+    checkpoint: dict[str, Any],
+    db_path: str = DEFAULT_DB_PATH,
+    run_id: int | None = None,
+) -> None:
+    init_sqlite_db(db_path=db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO crawl_checkpoints (
+                platform,
+                creator_url,
+                checkpoint_json,
+                last_run_id
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT(platform, creator_url) DO UPDATE SET
+                checkpoint_json = excluded.checkpoint_json,
+                last_run_id = excluded.last_run_id,
+                updated_at_utc = datetime('now')
+            """,
+            (
+                platform,
+                creator_url,
+                json.dumps(checkpoint, ensure_ascii=False),
+                run_id,
+            ),
+        )
+        conn.commit()
+
+
 def _creator_row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
     metadata_text = row[5] if isinstance(row[5], str) else "{}"
     try:
@@ -533,6 +612,7 @@ def _compute_post_diff(
     *,
     existing_posts: dict[str, dict[str, Any]],
     incoming_posts: list[dict[str, Any]],
+    include_missing: bool,
 ) -> dict[str, Any]:
     incoming_map: dict[str, dict[str, Any]] = {}
     for post in incoming_posts:
@@ -564,9 +644,10 @@ def _compute_post_diff(
         )
 
     missing_items: list[dict[str, Any]] = []
-    for post_url, previous_payload in existing_posts.items():
-        if post_url not in incoming_map:
-            missing_items.append({"post_url": post_url, "before": previous_payload})
+    if include_missing:
+        for post_url, previous_payload in existing_posts.items():
+            if post_url not in incoming_map:
+                missing_items.append({"post_url": post_url, "before": previous_payload})
 
     return {
         "new_items": new_items,
