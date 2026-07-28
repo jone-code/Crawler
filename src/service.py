@@ -4,6 +4,7 @@ import asyncio
 from typing import Literal
 
 from .crawlers import DouyinCrawler, XiaohongshuCrawler
+from .media_downloader import download_post_media
 from .storage import list_creators, mark_creator_crawled, register_creator, save_creator_content
 
 Platform = Literal["xiaohongshu", "douyin"]
@@ -146,6 +147,8 @@ async def crawl_creator_and_store(
     headless: bool = True,
     cookies_path: str | None = None,
     db_path: str = "data/crawler.db",
+    download_media: bool = False,
+    media_root: str = "data/media",
 ) -> dict:
     payload = await crawl_creator(
         platform=platform,
@@ -154,8 +157,11 @@ async def crawl_creator_and_store(
         headless=headless,
         cookies_path=cookies_path,
     )
+    media_result: dict | None = None
+    if download_media:
+        media_result = download_post_media(payload, media_root=media_root)
     storage = save_creator_content(payload, db_path=db_path)
-    return {"crawl": payload, "storage": storage}
+    return {"crawl": payload, "storage": storage, "media": media_result}
 
 
 def crawl_creator_and_store_sync(
@@ -166,6 +172,8 @@ def crawl_creator_and_store_sync(
     headless: bool = True,
     cookies_path: str | None = None,
     db_path: str = "data/crawler.db",
+    download_media: bool = False,
+    media_root: str = "data/media",
 ) -> dict:
     return asyncio.run(
         crawl_creator_and_store(
@@ -175,6 +183,8 @@ def crawl_creator_and_store_sync(
             headless=headless,
             cookies_path=cookies_path,
             db_path=db_path,
+            download_media=download_media,
+            media_root=media_root,
         )
     )
 
@@ -187,6 +197,8 @@ async def crawl_creator_by_id_and_store(
     headless: bool = True,
     cookies_path: str | None = None,
     db_path: str = "data/crawler.db",
+    download_media: bool = False,
+    media_root: str = "data/media",
 ) -> dict:
     creator_url = build_creator_url(platform, creator_id)
     # Ensure backend creator registry has this id for later scheduling/management.
@@ -203,6 +215,8 @@ async def crawl_creator_by_id_and_store(
         headless=headless,
         cookies_path=cookies_path,
         db_path=db_path,
+        download_media=download_media,
+        media_root=media_root,
     )
     crawl_time_utc = result["crawl"].get("crawl_time_utc")
     if isinstance(crawl_time_utc, str) and crawl_time_utc:
@@ -223,6 +237,8 @@ def crawl_creator_by_id_and_store_sync(
     headless: bool = True,
     cookies_path: str | None = None,
     db_path: str = "data/crawler.db",
+    download_media: bool = False,
+    media_root: str = "data/media",
 ) -> dict:
     return asyncio.run(
         crawl_creator_by_id_and_store(
@@ -232,5 +248,7 @@ def crawl_creator_by_id_and_store_sync(
             headless=headless,
             cookies_path=cookies_path,
             db_path=db_path,
+            download_media=download_media,
+            media_root=media_root,
         )
     )

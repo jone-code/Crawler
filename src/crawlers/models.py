@@ -18,6 +18,9 @@ class CreatorPost:
     comment_count: int | None = None
     share_count: int | None = None
     publish_time: str | None = None
+    image_urls: list[str] = field(default_factory=list)
+    video_urls: list[str] = field(default_factory=list)
+    media_assets: list[dict[str, Any]] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:

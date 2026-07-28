@@ -12,6 +12,7 @@ from .service import (
     create_crawler,
     list_creator_ids,
 )
+from .media_downloader import download_post_media
 from .storage import init_sqlite_db, list_creators, mark_creator_crawled, register_creator, save_creator_content
 
 __all__ = [
@@ -27,6 +28,7 @@ __all__ = [
     "crawl_creator_by_id_and_store_sync",
     "add_creator_id",
     "list_creator_ids",
+    "download_post_media",
     "init_sqlite_db",
     "save_creator_content",
     "register_creator",

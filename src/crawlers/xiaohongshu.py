@@ -95,6 +95,9 @@ class XiaohongshuCrawler(BaseCrawler):
                 description=card.get("description"),
                 cover_url=card.get("cover_url"),
                 like_count=self._parse_count(card.get("like_text")),
+                image_urls=[],
+                video_urls=[],
+                media_assets=[],
                 raw=card,
             )
             for card in cards
@@ -174,6 +177,138 @@ class XiaohongshuCrawler(BaseCrawler):
                       const pick = (selector, attr = "content") =>
                         document.querySelector(selector)?.getAttribute(attr) || null;
                       const pageTitle = document.title || null;
+                      const normalize = (value) => {
+                        if (!value || typeof value !== "string") return null;
+                        const text = value.trim();
+                        if (!text) return null;
+                        if (text.startsWith("//")) return `https:${text}`;
+                        return text;
+                      };
+                      const pickList = (item, keys) => {
+                        const out = [];
+                        for (const key of keys) {
+                          const value = item?.[key];
+                          if (typeof value === "string") out.push(value);
+                          if (Array.isArray(value)) {
+                            for (const sub of value) {
+                              if (typeof sub === "string") out.push(sub);
+                              if (sub && typeof sub === "object") {
+                                for (const subValue of Object.values(sub)) {
+                                  if (typeof subValue === "string") out.push(subValue);
+                                }
+                              }
+                            }
+                          }
+                        }
+                        return out;
+                      };
+                      const pushUnique = (arr, value) => {
+                        const normalized = normalize(value);
+                        if (!normalized) return;
+                        if (!arr.includes(normalized)) arr.push(normalized);
+                      };
+                      const looksLikeVideo = (value) => {
+                        const text = value.toLowerCase();
+                        return (
+                          text.includes(".mp4") ||
+                          text.includes(".m3u8") ||
+                          text.includes("video") ||
+                          text.includes("stream")
+                        );
+                      };
+                      const looksLikeImage = (value) => {
+                        const text = value.toLowerCase();
+                        return (
+                          text.includes(".jpg") ||
+                          text.includes(".jpeg") ||
+                          text.includes(".png") ||
+                          text.includes(".webp") ||
+                          text.includes("xhscdn.com")
+                        );
+                      };
+                      const state = window.__INITIAL_STATE__ || {};
+                      const noteState = state.note || {};
+                      const detailMap = noteState.noteDetailMap || {};
+                      const detailMapValues = Object.values(detailMap);
+                      let noteObject = null;
+                      for (const item of detailMapValues) {
+                        if (item?.note && Object.keys(item.note).length > 0) {
+                          noteObject = item.note;
+                          break;
+                        }
+                      }
+                      const imageUrls = [];
+                      const videoUrls = [];
+                      const mediaAssets = [];
+                      const appendMedia = (type, url) => {
+                        const normalized = normalize(url);
+                        if (!normalized) return;
+                        if (type === "video") {
+                          if (!videoUrls.includes(normalized)) videoUrls.push(normalized);
+                        } else {
+                          if (!imageUrls.includes(normalized)) imageUrls.push(normalized);
+                        }
+                        if (!mediaAssets.find(item => item.media_type === type && item.url === normalized)) {
+                          mediaAssets.push({ media_type: type, url: normalized });
+                        }
+                      };
+
+                      if (noteObject) {
+                        const imageList = noteObject.imageList || noteObject.images || [];
+                        for (const imageItem of imageList) {
+                          const candidates = [
+                            ...pickList(imageItem, ["urlDefault", "urlPre", "url", "urlLarge", "urlOrigin", "livePhotoFileId"]),
+                            ...pickList(imageItem, ["infoList"]),
+                          ];
+                          for (const candidate of candidates) {
+                            if (typeof candidate === "string") {
+                              appendMedia("image", candidate);
+                            }
+                          }
+                        }
+
+                        const queue = [noteObject.video, noteObject.noteVideo, noteObject];
+                        const visited = new Set();
+                        while (queue.length) {
+                          const current = queue.pop();
+                          if (!current || typeof current !== "object") continue;
+                          if (visited.has(current)) continue;
+                          visited.add(current);
+
+                          for (const value of Object.values(current)) {
+                            if (!value) continue;
+                            if (typeof value === "string") {
+                              if (value.startsWith("http") || value.startsWith("//")) {
+                                if (looksLikeVideo(value)) {
+                                  appendMedia("video", value);
+                                } else if (looksLikeImage(value)) {
+                                  appendMedia("image", value);
+                                }
+                              }
+                            } else if (Array.isArray(value)) {
+                              for (const sub of value) {
+                                if (sub && typeof sub === "object") queue.push(sub);
+                                if (typeof sub === "string" && (sub.startsWith("http") || sub.startsWith("//"))) {
+                                  if (looksLikeVideo(sub)) {
+                                    appendMedia("video", sub);
+                                  } else if (looksLikeImage(sub)) {
+                                    appendMedia("image", sub);
+                                  }
+                                }
+                              }
+                            } else if (typeof value === "object") {
+                              queue.push(value);
+                            }
+                          }
+                        }
+                      }
+
+                      const metaCover =
+                        pick("meta[property='og:image']") ||
+                        pick("meta[name='og:image']") ||
+                        null;
+                      if (metaCover) appendMedia("image", metaCover);
+
                       return {
                         title:
                           pick("meta[property='og:title']") ||
@@ -192,6 +327,9 @@ class XiaohongshuCrawler(BaseCrawler):
                           pick("meta[name='article:published_time']") ||
                           null,
                         page_title: pageTitle,
+                        image_urls: imageUrls,
+                        video_urls: videoUrls,
+                        media_assets: mediaAssets,
                       };
                     }
                     """
@@ -205,6 +343,9 @@ class XiaohongshuCrawler(BaseCrawler):
             cover_url = self._normalize_cover_url(details.get("cover_url"))
             publish_time = details.get("publish_time")
             page_title = self._clean_title(details.get("page_title"))
+            image_urls = self._normalize_urls(details.get("image_urls"))
+            video_urls = self._normalize_urls(details.get("video_urls"))
+            media_assets = self._normalize_media_assets(details.get("media_assets"))
 
             if title:
                 post.title = title
@@ -219,6 +360,13 @@ class XiaohongshuCrawler(BaseCrawler):
 
             if isinstance(publish_time, str) and publish_time.strip():
                 post.publish_time = publish_time.strip()
+
+            if image_urls:
+                post.image_urls = image_urls
+            if video_urls:
+                post.video_urls = video_urls
+            if media_assets:
+                post.media_assets = media_assets
 
             post.raw["detail_url"] = detail_url
             post.raw["detail_meta"] = details
@@ -274,3 +422,34 @@ class XiaohongshuCrawler(BaseCrawler):
         if text.startswith("//"):
             return f"https:{text}"
         return text
+
+    def _normalize_urls(self, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        output: list[str] = []
+        for item in value:
+            normalized = self._normalize_cover_url(item)
+            if normalized and normalized not in output:
+                output.append(normalized)
+        return output
+
+    def _normalize_media_assets(self, value: Any) -> list[dict[str, str]]:
+        if not isinstance(value, list):
+            return []
+        output: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            media_type = item.get("media_type")
+            url = self._normalize_cover_url(item.get("url"))
+            if media_type not in {"image", "video"}:
+                continue
+            if not url:
+                continue
+            key = (media_type, url)
+            if key in seen:
+                continue
+            seen.add(key)
+            output.append({"media_type": media_type, "url": url})
+        return output

@@ -13,6 +13,7 @@ This project crawls creator post lists from:
 - Python API for async/sync integration
 - SQLite persistence for crawl runs and posts
 - Backend creator-id registry (add/list creators)
+- Optional media downloading (images/videos)
 
 ## Environment
 
@@ -103,9 +104,12 @@ result = crawl_creator_by_id_and_store_sync(
     creator_id="<creator_id>",
     max_items=20,
     db_path=DB_PATH,
+    download_media=True,
+    media_root="data/media",
 )
 
 print(result["storage"])
+print(result["media"])
 print(list_creator_ids(db_path=DB_PATH, platform="xiaohongshu"))
 ```
 
@@ -158,4 +162,5 @@ save_creator_content(payload, db_path="data/crawler.db")
 - Douyin creator pages often require login/verification, so pass `cookies_path` for stable results.
 - SQLite schema is auto-created on first write (`crawl_runs` and `posts` tables).
 - Creator registry table (`creators`) is also auto-created for backend id management.
+- Media metadata is stored in `post_media`, and downloaded files are stored under `data/media/<platform>/<creator_id>/<post_id>/`.
 - For stable production crawling, combine browser automation with request-level API parsing and retry strategy.

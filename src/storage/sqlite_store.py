@@ -67,6 +67,26 @@ def init_sqlite_db(db_path: str = DEFAULT_DB_PATH) -> None:
 
             CREATE INDEX IF NOT EXISTS idx_posts_platform_creator
               ON posts(platform, creator_url);
+
+            CREATE TABLE IF NOT EXISTS post_media (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                platform TEXT NOT NULL,
+                post_url TEXT NOT NULL,
+                post_id TEXT NOT NULL,
+                media_type TEXT NOT NULL,
+                media_url TEXT NOT NULL,
+                local_path TEXT,
+                download_status TEXT,
+                file_size INTEGER,
+                error TEXT,
+                inserted_at_utc TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (run_id) REFERENCES crawl_runs(id) ON DELETE CASCADE,
+                UNIQUE(platform, post_url, media_url)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_post_media_platform_post
+              ON post_media(platform, post_url);
             """
         )
 
@@ -77,6 +97,7 @@ def save_creator_content(payload: dict[str, Any], db_path: str = DEFAULT_DB_PATH
     if not isinstance(posts, list):
         raise ValueError("payload['posts'] must be a list")
 
+    media_rows_saved = 0
     with sqlite3.connect(db_path) as conn:
         conn.execute("PRAGMA foreign_keys = ON;")
         cursor = conn.execute(
@@ -149,6 +170,7 @@ def save_creator_content(payload: dict[str, Any], db_path: str = DEFAULT_DB_PATH
                     json.dumps(post.get("raw", {}), ensure_ascii=False),
                 ),
             )
+            media_rows_saved += _save_post_media(conn, run_id, post)
 
         conn.commit()
 
@@ -156,6 +178,7 @@ def save_creator_content(payload: dict[str, Any], db_path: str = DEFAULT_DB_PATH
         "db_path": db_path,
         "run_id": run_id,
         "saved_posts": len(posts),
+        "saved_media_rows": media_rows_saved,
     }
 
 
@@ -298,3 +321,96 @@ def _creator_row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
         "created_at_utc": row[7],
         "updated_at_utc": row[8],
     }
+
+
+def _save_post_media(conn: sqlite3.Connection, run_id: int, post: dict[str, Any]) -> int:
+    platform = str(post.get("platform") or "")
+    post_url = str(post.get("post_url") or "")
+    post_id = str(post.get("post_id") or "")
+    if not platform or not post_url or not post_id:
+        return 0
+
+    candidates: list[dict[str, Any]] = []
+    assets = post.get("media_assets")
+    if isinstance(assets, list):
+        for item in assets:
+            if isinstance(item, dict):
+                candidates.append(item)
+
+    if not candidates:
+        for url in _extract_urls(post.get("image_urls")):
+            candidates.append({"media_type": "image", "url": url})
+        for url in _extract_urls(post.get("video_urls")):
+            candidates.append({"media_type": "video", "url": url})
+
+    inserted = 0
+    seen: set[tuple[str, str]] = set()
+    for item in candidates:
+        media_type = item.get("media_type")
+        media_url = item.get("url")
+        if media_type not in {"image", "video"}:
+            continue
+        if not isinstance(media_url, str) or not media_url.strip():
+            continue
+        media_url = media_url.strip()
+        key = (media_type, media_url)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        conn.execute(
+            """
+            INSERT INTO post_media (
+                run_id,
+                platform,
+                post_url,
+                post_id,
+                media_type,
+                media_url,
+                local_path,
+                download_status,
+                file_size,
+                error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(platform, post_url, media_url) DO UPDATE SET
+                run_id = excluded.run_id,
+                post_id = excluded.post_id,
+                local_path = excluded.local_path,
+                download_status = excluded.download_status,
+                file_size = excluded.file_size,
+                error = excluded.error,
+                inserted_at_utc = datetime('now')
+            """,
+            (
+                run_id,
+                platform,
+                post_url,
+                post_id,
+                media_type,
+                media_url,
+                item.get("local_path"),
+                item.get("status"),
+                item.get("file_size"),
+                item.get("error"),
+            ),
+        )
+        inserted += 1
+
+    return inserted
+
+
+def _extract_urls(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    output: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        url = item.strip()
+        if not url:
+            continue
+        if url.startswith("//"):
+            url = f"https:{url}"
+        if url not in output:
+            output.append(url)
+    return output
