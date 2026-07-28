@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from playwright.async_api import Page
 
@@ -31,6 +32,12 @@ class XiaohongshuCrawler(BaseCrawler):
                   return resolved;
                 }
               };
+              const normalizeDetailUrl = (value) => {
+                if (!value) return null;
+                if (value.startsWith("//")) return `https:${value}`;
+                if (value.startsWith("/")) return `https://www.xiaohongshu.com${value}`;
+                return value;
+              };
 
               const unique = new Map();
               const links = Array.from(document.querySelectorAll('a[href*="/explore/"]'));
@@ -39,21 +46,36 @@ class XiaohongshuCrawler(BaseCrawler):
                 if (!href) continue;
                 if (unique.has(href)) continue;
 
-                const titleNode = link.querySelector("img[alt], [class*='title'], [class*='desc']");
-                const text = (link.innerText || "").trim();
+                const cardRoot = link.parentElement;
+                const cardText = (cardRoot?.innerText || "").trim();
+                const textLines = cardText
+                  .split("\\n")
+                  .map(item => item.trim())
+                  .filter(Boolean);
+                const titleNode = cardRoot?.querySelector("img[alt], [class*='title'], [class*='desc']");
+                const profileLink = cardRoot?.querySelector("a.cover[href*='/user/profile/'], a[href*='/user/profile/']") || null;
+                const detailHref = normalizeDetailUrl(profileLink?.getAttribute("href") || null);
                 const title =
                   titleNode?.getAttribute?.("alt") ||
                   link.getAttribute("title") ||
                   link.getAttribute("aria-label") ||
-                  text.split("\\n")[0] ||
+                  textLines[0] ||
                   null;
-                const cover = normalizeUrl(link.querySelector("img")?.getAttribute("src") || null);
+                const likeText = textLines.length >= 3 ? textLines[textLines.length - 1] : null;
+                const cover = normalizeUrl(
+                  cardRoot?.querySelector("img")?.getAttribute("src") ||
+                  link.querySelector("img")?.getAttribute("src") ||
+                  null
+                );
 
                 unique.set(href, {
                   post_url: href,
                   title: title || null,
-                  description: text || null,
+                  description: title || null,
                   cover_url: cover,
+                  detail_url: detailHref,
+                  card_text_lines: textLines,
+                  like_text: likeText,
                 });
                 if (unique.size >= maxItems) break;
               }
@@ -72,11 +94,14 @@ class XiaohongshuCrawler(BaseCrawler):
                 title=card.get("title"),
                 description=card.get("description"),
                 cover_url=card.get("cover_url"),
+                like_count=self._parse_count(card.get("like_text")),
                 raw=card,
             )
             for card in cards
             if card.get("post_url")
         ]
+
+        await self._enrich_posts_with_details(page, posts)
 
         return CreatorContent.create(
             platform=self.platform,
@@ -128,3 +153,124 @@ class XiaohongshuCrawler(BaseCrawler):
     def _extract_post_id(self, post_url: str) -> str:
         match = re.search(r"/explore/([a-zA-Z0-9]+)", post_url)
         return match.group(1) if match else post_url
+
+    async def _enrich_posts_with_details(self, page: Page, posts: list[CreatorPost]) -> None:
+        for post in posts:
+            raw_detail_url = post.raw.get("detail_url")
+            detail_url = (
+                raw_detail_url
+                if isinstance(raw_detail_url, str) and raw_detail_url.strip()
+                else post.post_url
+            )
+            if not detail_url:
+                continue
+
+            try:
+                await page.goto(detail_url, wait_until="domcontentloaded", timeout=self.timeout_ms)
+                await page.wait_for_timeout(1400)
+                details = await page.evaluate(
+                    """
+                    () => {
+                      const pick = (selector, attr = "content") =>
+                        document.querySelector(selector)?.getAttribute(attr) || null;
+                      const pageTitle = document.title || null;
+                      return {
+                        title:
+                          pick("meta[property='og:title']") ||
+                          pick("meta[name='title']") ||
+                          null,
+                        description:
+                          pick("meta[property='og:description']") ||
+                          pick("meta[name='description']") ||
+                          null,
+                        cover_url:
+                          pick("meta[property='og:image']") ||
+                          pick("meta[name='og:image']") ||
+                          null,
+                        publish_time:
+                          pick("meta[property='article:published_time']") ||
+                          pick("meta[name='article:published_time']") ||
+                          null,
+                        page_title: pageTitle,
+                      };
+                    }
+                    """
+                )
+            except Exception as exc:  # noqa: BLE001
+                post.raw["detail_error"] = str(exc)
+                continue
+
+            title = self._clean_title(details.get("title"))
+            description = self._clean_description(details.get("description"))
+            cover_url = self._normalize_cover_url(details.get("cover_url"))
+            publish_time = details.get("publish_time")
+            page_title = self._clean_title(details.get("page_title"))
+
+            if title:
+                post.title = title
+            elif page_title:
+                post.title = page_title
+
+            if description and description != "3 亿人的生活经验，都在小红书":
+                post.description = description
+
+            if cover_url:
+                post.cover_url = cover_url
+
+            if isinstance(publish_time, str) and publish_time.strip():
+                post.publish_time = publish_time.strip()
+
+            post.raw["detail_url"] = detail_url
+            post.raw["detail_meta"] = details
+
+    def _parse_count(self, value: Any) -> int | None:
+        if not isinstance(value, str):
+            return None
+        raw = value.strip().lower().replace(",", "")
+        if not raw:
+            return None
+        if raw.endswith("w"):
+            try:
+                return int(float(raw[:-1]) * 10000)
+            except ValueError:
+                return None
+        if raw.endswith("万"):
+            try:
+                return int(float(raw[:-1]) * 10000)
+            except ValueError:
+                return None
+        digits = re.findall(r"[0-9]+", raw)
+        if not digits:
+            return None
+        try:
+            return int("".join(digits))
+        except ValueError:
+            return None
+
+    def _clean_title(self, value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        text = value.strip()
+        if not text:
+            return None
+        if text.endswith(" - 小红书"):
+            text = text[: -len(" - 小红书")].strip()
+        if text in {"小红书", "小红书 - 你的生活兴趣社区"}:
+            return None
+        return text or None
+
+    def _clean_description(self, value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        text = value.strip()
+        return text or None
+
+    def _normalize_cover_url(self, value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        text = value.strip()
+        if not text:
+            return None
+        if text.startswith("//"):
+            return f"https:{text}"
+        return text
