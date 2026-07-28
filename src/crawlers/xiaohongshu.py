@@ -243,6 +243,7 @@ class XiaohongshuCrawler(BaseCrawler):
                       const appendMedia = (type, url) => {
                         const normalized = normalize(url);
                         if (!normalized) return;
+                        if (!normalized.startsWith("http://") && !normalized.startsWith("https://")) return;
                         if (type === "video") {
                           if (!videoUrls.includes(normalized)) videoUrls.push(normalized);
                         } else {
@@ -257,7 +258,7 @@ class XiaohongshuCrawler(BaseCrawler):
                         const imageList = noteObject.imageList || noteObject.images || [];
                         for (const imageItem of imageList) {
                           const candidates = [
-                            ...pickList(imageItem, ["urlDefault", "urlPre", "url", "urlLarge", "urlOrigin", "livePhotoFileId"]),
+                            ...pickList(imageItem, ["urlDefault", "urlPre", "url", "urlLarge", "urlOrigin"]),
                             ...pickList(imageItem, ["infoList"]),
                           ];
                           for (const candidate of candidates) {
@@ -267,7 +268,7 @@ class XiaohongshuCrawler(BaseCrawler):
                           }
                         }
 
-                        const queue = [noteObject.video, noteObject.noteVideo, noteObject];
+                        const queue = [noteObject.video, noteObject.noteVideo];
                         const visited = new Set();
                         while (queue.length) {
                           const current = queue.pop();

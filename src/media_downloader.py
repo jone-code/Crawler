@@ -109,7 +109,9 @@ def _resolve_post_assets(post: dict[str, Any]) -> list[dict[str, str]]:
             media_type = item.get("media_type")
             url = item.get("url")
             if media_type in {"image", "video"} and isinstance(url, str) and url.strip():
-                parsed.append({"media_type": media_type, "url": url.strip()})
+                normalized = _normalize_url(url)
+                if normalized:
+                    parsed.append({"media_type": media_type, "url": normalized})
 
     if parsed:
         return _dedupe_assets(parsed)
@@ -120,7 +122,9 @@ def _resolve_post_assets(post: dict[str, Any]) -> list[dict[str, str]]:
         parsed.append({"media_type": "video", "url": video_url})
     cover_url = post.get("cover_url")
     if isinstance(cover_url, str) and cover_url.strip():
-        parsed.append({"media_type": "image", "url": cover_url.strip()})
+        normalized_cover = _normalize_url(cover_url)
+        if normalized_cover:
+            parsed.append({"media_type": "image", "url": normalized_cover})
     return _dedupe_assets(parsed)
 
 
@@ -131,13 +135,9 @@ def _normalize_urls(value: Any) -> list[str]:
     for item in value:
         if not isinstance(item, str):
             continue
-        text = item.strip()
-        if not text:
-            continue
-        if text.startswith("//"):
-            text = f"https:{text}"
-        if text not in output:
-            output.append(text)
+        normalized = _normalize_url(item)
+        if normalized and normalized not in output:
+            output.append(normalized)
     return output
 
 
@@ -176,3 +176,14 @@ def _guess_extension(url: str, media_type: str) -> str:
 
 def _short_hash(value: str) -> str:
     return hashlib.sha1(value.encode("utf-8")).hexdigest()[:12]
+
+
+def _normalize_url(value: str) -> str | None:
+    text = value.strip()
+    if not text:
+        return None
+    if text.startswith("//"):
+        text = f"https:{text}"
+    if not (text.startswith("http://") or text.startswith("https://")):
+        return None
+    return text
