@@ -102,7 +102,7 @@ add_creator_id(
 result = crawl_creator_by_id_and_store_sync(
     platform="xiaohongshu",
     creator_id="<creator_id>",
-    max_items=20,
+    max_items=20,  # set 0 for continuous deep pagination
     db_path=DB_PATH,
     download_media=True,
     media_root="data/media",
@@ -163,4 +163,5 @@ save_creator_content(payload, db_path="data/crawler.db")
 - SQLite schema is auto-created on first write (`crawl_runs` and `posts` tables).
 - Creator registry table (`creators`) is also auto-created for backend id management.
 - Media metadata is stored in `post_media`, and downloaded files are stored under `data/media/<platform>/<creator_id>/<post_id>/`.
+- Set `max_items=0` to enable continuous pagination probing (scroll until multiple rounds have no new posts).
 - For stable production crawling, combine browser automation with request-level API parsing and retry strategy.

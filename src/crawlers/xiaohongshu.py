@@ -18,6 +18,7 @@ class XiaohongshuCrawler(BaseCrawler):
         cards = await page.evaluate(
             """
             (maxItems) => {
+              const limit = Number.isFinite(maxItems) && maxItems > 0 ? maxItems : Number.POSITIVE_INFINITY;
               const normalizeUrl = (value) => {
                 if (!value) return null;
                 let resolved = value;
@@ -44,6 +45,7 @@ class XiaohongshuCrawler(BaseCrawler):
               for (const link of links) {
                 const href = normalizeUrl(link.getAttribute("href"));
                 if (!href) continue;
+                if (!/\/explore\/[a-zA-Z0-9]+/.test(href)) continue;
                 if (unique.has(href)) continue;
 
                 const cardRoot = link.parentElement;
@@ -77,7 +79,7 @@ class XiaohongshuCrawler(BaseCrawler):
                   card_text_lines: textLines,
                   like_text: likeText,
                 });
-                if (unique.size >= maxItems) break;
+                if (unique.size >= limit) break;
               }
               return Array.from(unique.values());
             }
@@ -115,18 +117,37 @@ class XiaohongshuCrawler(BaseCrawler):
 
     async def _auto_scroll(self, page: Page, *, max_items: int) -> None:
         previous_height = -1
-        for _ in range(8):
+        previous_count = 0
+        stable_rounds = 0
+        target_count = max_items if max_items > 0 else None
+
+        for _ in range(120):
             count = await page.evaluate(
-                """() => document.querySelectorAll('a[href*="/explore/"]').length"""
+                """
+                () => {
+                  const links = Array.from(document.querySelectorAll("a[href*='/explore/']"));
+                  const unique = new Set();
+                  for (const link of links) {
+                    const href = link.getAttribute("href") || "";
+                    if (/\/explore\/[a-zA-Z0-9]+/.test(href)) unique.add(href);
+                  }
+                  return unique.size;
+                }
+                """
             )
-            if count >= max_items:
+            if target_count is not None and count >= target_count:
                 break
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             await page.wait_for_timeout(1800)
             current_height = await page.evaluate("document.body.scrollHeight")
-            if current_height == previous_height:
+            if current_height <= previous_height and count <= previous_count:
+                stable_rounds += 1
+            else:
+                stable_rounds = 0
+            if stable_rounds >= 5:
                 break
             previous_height = current_height
+            previous_count = count
 
     async def _extract_creator_name(self, page: Page) -> str | None:
         page_title = (await page.title()).strip()
