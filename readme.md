@@ -110,6 +110,7 @@ result = crawl_creator_by_id_and_store_sync(
 
 print(result["storage"])
 print(result["media"])
+print(result["storage"]["diff"])
 print(list_creator_ids(db_path=DB_PATH, platform="xiaohongshu"))
 ```
 
@@ -164,4 +165,5 @@ save_creator_content(payload, db_path="data/crawler.db")
 - Creator registry table (`creators`) is also auto-created for backend id management.
 - Media metadata is stored in `post_media`, and downloaded files are stored under `data/media/<platform>/<creator_id>/<post_id>/`.
 - Set `max_items=0` to enable continuous pagination probing (scroll until multiple rounds have no new posts).
+- Diff data for each run is persisted in `crawl_diffs` and `crawl_diff_items`, and also returned in `result["storage"]["diff"]` (`new/updated/unchanged/missing`).
 - For stable production crawling, combine browser automation with request-level API parsing and retry strategy.

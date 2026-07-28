@@ -87,6 +87,38 @@ def init_sqlite_db(db_path: str = DEFAULT_DB_PATH) -> None:
 
             CREATE INDEX IF NOT EXISTS idx_post_media_platform_post
               ON post_media(platform, post_url);
+
+            CREATE TABLE IF NOT EXISTS crawl_diffs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL UNIQUE,
+                platform TEXT NOT NULL,
+                creator_url TEXT NOT NULL,
+                new_count INTEGER NOT NULL DEFAULT 0,
+                updated_count INTEGER NOT NULL DEFAULT 0,
+                unchanged_count INTEGER NOT NULL DEFAULT 0,
+                missing_count INTEGER NOT NULL DEFAULT 0,
+                summary_json TEXT NOT NULL,
+                created_at_utc TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (run_id) REFERENCES crawl_runs(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS crawl_diff_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                platform TEXT NOT NULL,
+                creator_url TEXT NOT NULL,
+                post_url TEXT NOT NULL,
+                post_id TEXT,
+                change_type TEXT NOT NULL,
+                before_payload TEXT,
+                after_payload TEXT,
+                created_at_utc TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (run_id) REFERENCES crawl_runs(id) ON DELETE CASCADE,
+                UNIQUE(run_id, post_url)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_crawl_diff_items_run_change
+              ON crawl_diff_items(run_id, change_type);
             """
         )
 
@@ -100,6 +132,11 @@ def save_creator_content(payload: dict[str, Any], db_path: str = DEFAULT_DB_PATH
     media_rows_saved = 0
     with sqlite3.connect(db_path) as conn:
         conn.execute("PRAGMA foreign_keys = ON;")
+        platform = str(payload.get("platform") or "")
+        creator_url = str(payload.get("creator_url") or "")
+        existing_posts = _fetch_existing_posts(conn, platform=platform, creator_url=creator_url)
+        diff_result = _compute_post_diff(existing_posts=existing_posts, incoming_posts=posts)
+
         cursor = conn.execute(
             """
             INSERT INTO crawl_runs (
@@ -172,6 +209,14 @@ def save_creator_content(payload: dict[str, Any], db_path: str = DEFAULT_DB_PATH
             )
             media_rows_saved += _save_post_media(conn, run_id, post)
 
+        _save_diff_records(
+            conn,
+            run_id=run_id,
+            platform=platform,
+            creator_url=creator_url,
+            diff_result=diff_result,
+        )
+
         conn.commit()
 
     return {
@@ -179,6 +224,7 @@ def save_creator_content(payload: dict[str, Any], db_path: str = DEFAULT_DB_PATH
         "run_id": run_id,
         "saved_posts": len(posts),
         "saved_media_rows": media_rows_saved,
+        "diff": _serialize_diff_result(diff_result),
     }
 
 
@@ -414,3 +460,258 @@ def _extract_urls(value: Any) -> list[str]:
         if url not in output:
             output.append(url)
     return output
+
+
+def _fetch_existing_posts(
+    conn: sqlite3.Connection, *, platform: str, creator_url: str
+) -> dict[str, dict[str, Any]]:
+    if not platform or not creator_url:
+        return {}
+    rows = conn.execute(
+        """
+        SELECT
+            post_url,
+            post_id,
+            title,
+            description,
+            cover_url,
+            like_count,
+            comment_count,
+            share_count,
+            publish_time,
+            raw
+        FROM posts
+        WHERE platform = ? AND creator_url = ?
+        """,
+        (platform, creator_url),
+    ).fetchall()
+
+    output: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        post_url = row[0]
+        if not isinstance(post_url, str) or not post_url:
+            continue
+        raw_payload = _safe_json_loads(row[9])
+        output[post_url] = {
+            "post_url": post_url,
+            "post_id": row[1],
+            "title": row[2],
+            "description": row[3],
+            "cover_url": row[4],
+            "like_count": row[5],
+            "comment_count": row[6],
+            "share_count": row[7],
+            "publish_time": row[8],
+            "raw": raw_payload if isinstance(raw_payload, dict) else {},
+        }
+    return output
+
+
+def _compute_post_diff(
+    *,
+    existing_posts: dict[str, dict[str, Any]],
+    incoming_posts: list[dict[str, Any]],
+) -> dict[str, Any]:
+    incoming_map: dict[str, dict[str, Any]] = {}
+    for post in incoming_posts:
+        if not isinstance(post, dict):
+            continue
+        post_url = post.get("post_url")
+        if not isinstance(post_url, str) or not post_url.strip():
+            continue
+        incoming_map[post_url] = _normalize_post_payload(post)
+
+    new_items: list[dict[str, Any]] = []
+    updated_items: list[dict[str, Any]] = []
+    unchanged_count = 0
+
+    for post_url, current_payload in incoming_map.items():
+        previous_payload = existing_posts.get(post_url)
+        if previous_payload is None:
+            new_items.append({"post_url": post_url, "after": current_payload})
+            continue
+        if _payload_equal(previous_payload, current_payload):
+            unchanged_count += 1
+            continue
+        updated_items.append(
+            {
+                "post_url": post_url,
+                "before": previous_payload,
+                "after": current_payload,
+            }
+        )
+
+    missing_items: list[dict[str, Any]] = []
+    for post_url, previous_payload in existing_posts.items():
+        if post_url not in incoming_map:
+            missing_items.append({"post_url": post_url, "before": previous_payload})
+
+    return {
+        "new_items": new_items,
+        "updated_items": updated_items,
+        "missing_items": missing_items,
+        "unchanged_count": unchanged_count,
+    }
+
+
+def _normalize_post_payload(post: dict[str, Any]) -> dict[str, Any]:
+    raw_payload = post.get("raw")
+    if not isinstance(raw_payload, dict):
+        raw_payload = {}
+    return {
+        "post_url": post.get("post_url"),
+        "post_id": post.get("post_id"),
+        "title": post.get("title"),
+        "description": post.get("description"),
+        "cover_url": post.get("cover_url"),
+        "like_count": post.get("like_count"),
+        "comment_count": post.get("comment_count"),
+        "share_count": post.get("share_count"),
+        "publish_time": post.get("publish_time"),
+        "raw": raw_payload,
+    }
+
+
+def _payload_equal(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    return _stable_json(left) == _stable_json(right)
+
+
+def _stable_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _safe_json_loads(value: Any) -> Any:
+    if not isinstance(value, str):
+        return None
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return None
+
+
+def _serialize_diff_result(diff_result: dict[str, Any]) -> dict[str, Any]:
+    new_items = diff_result["new_items"]
+    updated_items = diff_result["updated_items"]
+    missing_items = diff_result["missing_items"]
+    unchanged_count = diff_result["unchanged_count"]
+    return {
+        "new_count": len(new_items),
+        "updated_count": len(updated_items),
+        "unchanged_count": unchanged_count,
+        "missing_count": len(missing_items),
+        "new_post_urls": [item["post_url"] for item in new_items],
+        "updated_post_urls": [item["post_url"] for item in updated_items],
+        "missing_post_urls": [item["post_url"] for item in missing_items],
+    }
+
+
+def _save_diff_records(
+    conn: sqlite3.Connection,
+    *,
+    run_id: int,
+    platform: str,
+    creator_url: str,
+    diff_result: dict[str, Any],
+) -> None:
+    summary = _serialize_diff_result(diff_result)
+    conn.execute(
+        """
+        INSERT INTO crawl_diffs (
+            run_id,
+            platform,
+            creator_url,
+            new_count,
+            updated_count,
+            unchanged_count,
+            missing_count,
+            summary_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            run_id,
+            platform,
+            creator_url,
+            summary["new_count"],
+            summary["updated_count"],
+            summary["unchanged_count"],
+            summary["missing_count"],
+            json.dumps(summary, ensure_ascii=False),
+        ),
+    )
+
+    for item in diff_result["new_items"]:
+        after_payload = item["after"]
+        conn.execute(
+            """
+            INSERT INTO crawl_diff_items (
+                run_id,
+                platform,
+                creator_url,
+                post_url,
+                post_id,
+                change_type,
+                before_payload,
+                after_payload
+            ) VALUES (?, ?, ?, ?, ?, 'new', NULL, ?)
+            """,
+            (
+                run_id,
+                platform,
+                creator_url,
+                item["post_url"],
+                after_payload.get("post_id"),
+                json.dumps(after_payload, ensure_ascii=False),
+            ),
+        )
+
+    for item in diff_result["updated_items"]:
+        before_payload = item["before"]
+        after_payload = item["after"]
+        conn.execute(
+            """
+            INSERT INTO crawl_diff_items (
+                run_id,
+                platform,
+                creator_url,
+                post_url,
+                post_id,
+                change_type,
+                before_payload,
+                after_payload
+            ) VALUES (?, ?, ?, ?, ?, 'updated', ?, ?)
+            """,
+            (
+                run_id,
+                platform,
+                creator_url,
+                item["post_url"],
+                after_payload.get("post_id"),
+                json.dumps(before_payload, ensure_ascii=False),
+                json.dumps(after_payload, ensure_ascii=False),
+            ),
+        )
+
+    for item in diff_result["missing_items"]:
+        before_payload = item["before"]
+        conn.execute(
+            """
+            INSERT INTO crawl_diff_items (
+                run_id,
+                platform,
+                creator_url,
+                post_url,
+                post_id,
+                change_type,
+                before_payload,
+                after_payload
+            ) VALUES (?, ?, ?, ?, ?, 'missing', ?, NULL)
+            """,
+            (
+                run_id,
+                platform,
+                creator_url,
+                item["post_url"],
+                before_payload.get("post_id"),
+                json.dumps(before_payload, ensure_ascii=False),
+            ),
+        )
