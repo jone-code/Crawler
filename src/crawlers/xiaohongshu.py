@@ -13,12 +13,85 @@ class XiaohongshuCrawler(BaseCrawler):
     platform = "xiaohongshu"
 
     async def _crawl_page(self, page: Page, creator_url: str, max_items: int) -> CreatorContent:
-        await self._auto_scroll(page, max_items=max_items)
+        cards = await self._collect_cards_with_pagination(page, max_items=max_items)
         creator_name = await self._extract_creator_name(page)
-        cards = await page.evaluate(
-            """
-            (maxItems) => {
-              const limit = Number.isFinite(maxItems) && maxItems > 0 ? maxItems : Number.POSITIVE_INFINITY;
+
+        posts = [
+            CreatorPost(
+                platform=self.platform,
+                creator_url=creator_url,
+                post_id=self._extract_post_id(card.get("post_url", "")),
+                post_url=card.get("post_url", ""),
+                title=card.get("title"),
+                description=card.get("description"),
+                cover_url=card.get("cover_url"),
+                like_count=self._parse_count(card.get("like_text")),
+                image_urls=[],
+                video_urls=[],
+                media_assets=[],
+                raw=card,
+            )
+            for card in cards
+            if card.get("post_url")
+        ]
+
+        await self._enrich_posts_with_details(page, posts)
+
+        return CreatorContent.create(
+            platform=self.platform,
+            creator_url=creator_url,
+            creator_name=creator_name,
+            posts=posts,
+        )
+
+    async def _collect_cards_with_pagination(
+        self, page: Page, *, max_items: int
+    ) -> list[dict[str, Any]]:
+        target_count = max_items if max_items > 0 else None
+        cards_map: dict[str, dict[str, Any]] = {}
+        previous_height = -1
+        previous_total = 0
+        stable_rounds = 0
+
+        for _ in range(120):
+            visible_cards = await self._extract_visible_cards(page)
+            for card in visible_cards:
+                post_url = card.get("post_url")
+                if not isinstance(post_url, str) or not post_url:
+                    continue
+                existing = cards_map.get(post_url)
+                if existing is None:
+                    cards_map[post_url] = card
+                else:
+                    cards_map[post_url] = self._merge_card(existing, card)
+
+            if target_count is not None and len(cards_map) >= target_count:
+                break
+
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await page.wait_for_timeout(1800)
+            current_height = await page.evaluate("document.body.scrollHeight")
+            current_total = len(cards_map)
+
+            if current_height <= previous_height and current_total <= previous_total:
+                stable_rounds += 1
+            else:
+                stable_rounds = 0
+            if stable_rounds >= 5:
+                break
+
+            previous_height = current_height
+            previous_total = current_total
+
+        cards = list(cards_map.values())
+        if target_count is not None:
+            return cards[:target_count]
+        return cards
+
+    async def _extract_visible_cards(self, page: Page) -> list[dict[str, Any]]:
+        return await page.evaluate(
+            r"""
+            () => {
               const normalizeUrl = (value) => {
                 if (!value) return null;
                 let resolved = value;
@@ -51,7 +124,7 @@ class XiaohongshuCrawler(BaseCrawler):
                 const cardRoot = link.parentElement;
                 const cardText = (cardRoot?.innerText || "").trim();
                 const textLines = cardText
-                  .split("\\n")
+                  .split("\n")
                   .map(item => item.trim())
                   .filter(Boolean);
                 const titleNode = cardRoot?.querySelector("img[alt], [class*='title'], [class*='desc']");
@@ -79,75 +152,28 @@ class XiaohongshuCrawler(BaseCrawler):
                   card_text_lines: textLines,
                   like_text: likeText,
                 });
-                if (unique.size >= limit) break;
               }
               return Array.from(unique.values());
             }
-            """,
-            max_items,
+            """
         )
 
-        posts = [
-            CreatorPost(
-                platform=self.platform,
-                creator_url=creator_url,
-                post_id=self._extract_post_id(card.get("post_url", "")),
-                post_url=card.get("post_url", ""),
-                title=card.get("title"),
-                description=card.get("description"),
-                cover_url=card.get("cover_url"),
-                like_count=self._parse_count(card.get("like_text")),
-                image_urls=[],
-                video_urls=[],
-                media_assets=[],
-                raw=card,
-            )
-            for card in cards
-            if card.get("post_url")
-        ]
-
-        await self._enrich_posts_with_details(page, posts)
-
-        return CreatorContent.create(
-            platform=self.platform,
-            creator_url=creator_url,
-            creator_name=creator_name,
-            posts=posts,
-        )
-
-    async def _auto_scroll(self, page: Page, *, max_items: int) -> None:
-        previous_height = -1
-        previous_count = 0
-        stable_rounds = 0
-        target_count = max_items if max_items > 0 else None
-
-        for _ in range(120):
-            count = await page.evaluate(
-                """
-                () => {
-                  const links = Array.from(document.querySelectorAll("a[href*='/explore/']"));
-                  const unique = new Set();
-                  for (const link of links) {
-                    const href = link.getAttribute("href") || "";
-                    if (/\/explore\/[a-zA-Z0-9]+/.test(href)) unique.add(href);
-                  }
-                  return unique.size;
-                }
-                """
-            )
-            if target_count is not None and count >= target_count:
-                break
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await page.wait_for_timeout(1800)
-            current_height = await page.evaluate("document.body.scrollHeight")
-            if current_height <= previous_height and count <= previous_count:
-                stable_rounds += 1
-            else:
-                stable_rounds = 0
-            if stable_rounds >= 5:
-                break
-            previous_height = current_height
-            previous_count = count
+    def _merge_card(self, existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(existing)
+        for key in [
+            "title",
+            "description",
+            "cover_url",
+            "detail_url",
+            "like_text",
+        ]:
+            existing_value = merged.get(key)
+            incoming_value = incoming.get(key)
+            if (not existing_value) and incoming_value:
+                merged[key] = incoming_value
+        if isinstance(incoming.get("card_text_lines"), list) and not merged.get("card_text_lines"):
+            merged["card_text_lines"] = incoming["card_text_lines"]
+        return merged
 
     async def _extract_creator_name(self, page: Page) -> str | None:
         page_title = (await page.title()).strip()

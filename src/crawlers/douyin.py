@@ -15,7 +15,7 @@ class DouyinCrawler(BaseCrawler):
         await self._auto_scroll(page, max_items=max_items)
         creator_name = await self._extract_creator_name(page)
         cards = await page.evaluate(
-            """
+            r"""
             (maxItems) => {
               const limit = Number.isFinite(maxItems) && maxItems > 0 ? maxItems : Number.POSITIVE_INFINITY;
               const normalizeUrl = (value) => {
@@ -104,7 +104,7 @@ class DouyinCrawler(BaseCrawler):
 
         for _ in range(120):
             count = await page.evaluate(
-                """
+                r"""
                 () => {
                   const links = Array.from(document.querySelectorAll("a[href*='/video/'], a[href*='/note/']"));
                   const unique = new Set();
