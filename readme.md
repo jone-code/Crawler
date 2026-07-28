@@ -14,6 +14,7 @@ This project crawls creator post lists from:
 - SQLite persistence for crawl runs and posts
 - Backend creator-id registry (add/list creators)
 - Optional media downloading (images/videos)
+- Built-in admin web page (creator management + crawl runs + diff view)
 
 ## Environment
 
@@ -30,6 +31,20 @@ python -m playwright install chromium
 ```
 
 ## Usage
+
+### Admin Web Page
+
+```bash
+pip install -r requirements.txt
+python -m src.admin_web
+```
+
+Then open `http://127.0.0.1:8000` to:
+
+- add/enable/disable creators
+- trigger crawl jobs
+- inspect per-run diff summary (`new/updated/missing`)
+- inspect media download status
 
 ### Synchronous Call
 

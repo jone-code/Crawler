@@ -4,6 +4,7 @@ from .sqlite_store import (
     mark_creator_crawled,
     register_creator,
     save_creator_content,
+    set_creator_enabled,
 )
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "register_creator",
     "list_creators",
     "mark_creator_crawled",
+    "set_creator_enabled",
 ]

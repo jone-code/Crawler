@@ -14,6 +14,7 @@ from .service import (
 )
 from .media_downloader import download_post_media
 from .storage import init_sqlite_db, list_creators, mark_creator_crawled, register_creator, save_creator_content
+from .storage import set_creator_enabled
 
 __all__ = [
     "create_crawler",
@@ -34,4 +35,5 @@ __all__ = [
     "register_creator",
     "list_creators",
     "mark_creator_crawled",
+    "set_creator_enabled",
 ]

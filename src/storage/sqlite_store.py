@@ -349,6 +349,28 @@ def mark_creator_crawled(
         conn.commit()
 
 
+def set_creator_enabled(
+    *,
+    platform: str,
+    creator_id: str,
+    enabled: bool,
+    db_path: str = DEFAULT_DB_PATH,
+) -> None:
+    init_sqlite_db(db_path=db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE creators
+            SET
+                enabled = ?,
+                updated_at_utc = datetime('now')
+            WHERE platform = ? AND creator_id = ?
+            """,
+            (1 if enabled else 0, platform, creator_id),
+        )
+        conn.commit()
+
+
 def _creator_row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
     metadata_text = row[5] if isinstance(row[5], str) else "{}"
     try:
