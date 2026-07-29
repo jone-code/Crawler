@@ -28,6 +28,7 @@
       .inline-form { display: inline; }
       code { background: #eef2ff; padding: 2px 6px; border-radius: 6px; }
       a { color: #1d4ed8; text-decoration: none; }
+      .small { font-size: 12px; }
     </style>
   </head>
   <body>
@@ -74,10 +75,32 @@
           <input type="number" name="max_items" value="20" min="0" />
           <label>cookies_path（可选）</label>
           <input name="cookies_path" placeholder="cookies/xiaohongshu.cookies.json" />
+          <label><input type="checkbox" name="use_account_pool" style="width:auto;" /> 使用账号池自动轮询（忽略上面的 cookies_path）</label>
           <label>media_root</label>
           <input name="media_root" value="data/media" />
           <label><input type="checkbox" name="download_media" style="width:auto;" /> 下载图片/视频</label>
           <button type="submit">开始抓取</button>
+        </form>
+      </div>
+
+      <div class="card">
+        <h2>添加/更新抓取账号</h2>
+        <form method="post" action="/accounts">
+          <label>平台</label>
+          <select name="platform" required>
+            <option value="xiaohongshu">xiaohongshu</option>
+            <option value="douyin">douyin</option>
+          </select>
+          <label>账号名（自定义）</label>
+          <input name="account_name" placeholder="例如: xhs_main_01" required />
+          <label>cookies_path</label>
+          <input name="cookies_path" placeholder="cookies/xhs_account_01.json" required />
+          <label>priority（越小优先级越高）</label>
+          <input type="number" name="priority" value="100" />
+          <label>metadata JSON（可选）</label>
+          <textarea name="metadata_json" placeholder='{"owner":"team-a"}'></textarea>
+          <label><input type="checkbox" name="enabled" checked style="width:auto;" /> 启用</label>
+          <button type="submit">保存账号</button>
         </form>
       </div>
     </div>
@@ -120,6 +143,56 @@
           </tr>
           {% else %}
           <tr><td colspan="6">暂无博主</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <h2>账号池</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>平台</th>
+            <th>账号名</th>
+            <th>cookies_path</th>
+            <th>状态</th>
+            <th>优先级</th>
+            <th>成功/失败</th>
+            <th>最近健康度</th>
+            <th>最近使用</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for account in accounts %}
+          <tr>
+            <td>{{ account.id }}</td>
+            <td>{{ account.platform }}</td>
+            <td><code>{{ account.account_name }}</code></td>
+            <td class="small">{{ account.cookies_path }}</td>
+            <td>
+              {% if account.enabled %}
+                <span class="pill enabled">enabled</span>
+              {% else %}
+                <span class="pill disabled">disabled</span>
+              {% endif %}
+            </td>
+            <td>{{ account.priority }}</td>
+            <td>{{ account.success_count }} / {{ account.fail_count }}</td>
+            <td>{{ account.last_health or "-" }}</td>
+            <td>{{ account.last_used_at_utc or "-" }}</td>
+            <td>
+              <form class="inline-form" method="post" action="/accounts/toggle">
+                <input type="hidden" name="account_id" value="{{ account.id }}" />
+                <input type="hidden" name="enabled" value="{{ 0 if account.enabled else 1 }}" />
+                <button class="secondary" type="submit">{{ "停用" if account.enabled else "启用" }}</button>
+              </form>
+            </td>
+          </tr>
+          {% else %}
+          <tr><td colspan="10">暂无账号</td></tr>
           {% endfor %}
         </tbody>
       </table>

@@ -7,7 +7,14 @@ from typing import Any
 
 from flask import Flask, flash, redirect, render_template, request, url_for
 
-from .service import add_creator_id, crawl_creator_by_id_and_store_sync, list_creator_ids
+from .service import (
+    add_crawl_account,
+    add_creator_id,
+    crawl_creator_by_id_and_store_sync,
+    list_crawl_account_pool,
+    list_creator_ids,
+    toggle_crawl_account,
+)
 from .storage import init_sqlite_db, set_creator_enabled
 from .storage.sqlite_store import DEFAULT_DB_PATH
 
@@ -23,10 +30,12 @@ def create_app(db_path: str | None = None) -> Flask:
     @app.get("/")
     def dashboard():
         creators = list_creator_ids(db_path=app.config["DB_PATH"], enabled_only=False)
+        accounts = list_crawl_account_pool(db_path=app.config["DB_PATH"], enabled_only=False)
         recent_runs = _list_recent_runs(app.config["DB_PATH"], limit=50)
         return render_template(
             "dashboard.html",
             creators=creators,
+            accounts=accounts,
             recent_runs=recent_runs,
             default_db_path=app.config["DB_PATH"],
         )
@@ -82,6 +91,66 @@ def create_app(db_path: str | None = None) -> Flask:
             flash(f"更新状态失败: {exc}", "error")
         return redirect(url_for("dashboard"))
 
+    @app.post("/accounts")
+    def create_account():
+        platform = (request.form.get("platform") or "").strip()
+        account_name = (request.form.get("account_name") or "").strip()
+        cookies_path = (request.form.get("cookies_path") or "").strip()
+        metadata_text = (request.form.get("metadata_json") or "").strip()
+        enabled = request.form.get("enabled") == "on"
+        try:
+            priority = int((request.form.get("priority") or "100").strip())
+        except ValueError:
+            priority = 100
+        metadata: dict[str, Any] | None = None
+        if metadata_text:
+            try:
+                parsed = json.loads(metadata_text)
+                if isinstance(parsed, dict):
+                    metadata = parsed
+            except json.JSONDecodeError as exc:
+                flash(f"账号 metadata JSON 解析失败: {exc}", "error")
+                return redirect(url_for("dashboard"))
+        try:
+            account = add_crawl_account(
+                platform=platform,  # type: ignore[arg-type]
+                account_name=account_name,
+                cookies_path=cookies_path,
+                db_path=app.config["DB_PATH"],
+                enabled=enabled,
+                priority=priority,
+                metadata=metadata,
+            )
+            flash(
+                f"已保存账号: {account['platform']} / {account['account_name']}",
+                "success",
+            )
+        except Exception as exc:  # noqa: BLE001
+            flash(f"保存账号失败: {exc}", "error")
+        return redirect(url_for("dashboard"))
+
+    @app.post("/accounts/toggle")
+    def toggle_account():
+        try:
+            account_id = int((request.form.get("account_id") or "0").strip())
+        except ValueError:
+            account_id = 0
+        enabled = request.form.get("enabled") == "1"
+        if account_id <= 0:
+            flash("账号ID无效", "error")
+            return redirect(url_for("dashboard"))
+        try:
+            toggle_crawl_account(
+                account_id=account_id,
+                enabled=enabled,
+                db_path=app.config["DB_PATH"],
+            )
+            state = "启用" if enabled else "停用"
+            flash(f"已{state}账号 id={account_id}", "success")
+        except Exception as exc:  # noqa: BLE001
+            flash(f"更新账号状态失败: {exc}", "error")
+        return redirect(url_for("dashboard"))
+
     @app.post("/crawl")
     def trigger_crawl():
         platform = (request.form.get("platform") or "").strip()
@@ -89,6 +158,7 @@ def create_app(db_path: str | None = None) -> Flask:
         cookies_path = (request.form.get("cookies_path") or "").strip() or None
         media_root = (request.form.get("media_root") or "").strip() or "data/media"
         download_media = request.form.get("download_media") == "on"
+        use_account_pool = request.form.get("use_account_pool") == "on"
         try:
             max_items = int((request.form.get("max_items") or "20").strip())
         except ValueError:
@@ -104,6 +174,7 @@ def create_app(db_path: str | None = None) -> Flask:
                 db_path=app.config["DB_PATH"],
                 download_media=download_media,
                 media_root=media_root,
+                use_account_pool=use_account_pool,
             )
             run_id = result["storage"]["run_id"]
             diff = result["storage"]["diff"]
@@ -126,6 +197,12 @@ def create_app(db_path: str | None = None) -> Flask:
                     flash(f"会话告警: {warning}", "error")
             if runtime_status in {"limited", "no_data"}:
                 flash(f"会话状态: {runtime_status}", "error")
+            account_meta = result.get("crawl", {}).get("crawler_meta", {}).get("account", {})
+            if isinstance(account_meta, dict) and account_meta.get("account_name"):
+                flash(
+                    f"账号池命中: {account_meta.get('account_name')} ({account_meta.get('health')})",
+                    "success",
+                )
             return redirect(url_for("run_detail", run_id=run_id))
         except Exception as exc:  # noqa: BLE001
             flash(f"抓取失败: {exc}", "error")

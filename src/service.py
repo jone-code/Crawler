@@ -7,10 +7,14 @@ from .crawlers import DouyinCrawler, XiaohongshuCrawler
 from .media_downloader import download_post_media
 from .storage import (
     get_crawl_checkpoint,
+    list_crawl_accounts,
+    mark_crawl_account_result,
     list_creators,
     mark_creator_crawled,
+    register_crawl_account,
     register_creator,
     save_creator_content,
+    set_crawl_account_enabled,
     upsert_crawl_checkpoint,
 )
 
@@ -49,6 +53,41 @@ async def crawl_creator(
     cookies_path: str | None = None,
     use_checkpoint: bool = True,
     checkpoint_db_path: str = "data/crawler.db",
+    use_account_pool: bool = False,
+    account_pool_db_path: str = "data/crawler.db",
+) -> dict:
+    if use_account_pool and not cookies_path:
+        return await _crawl_with_account_pool(
+            platform=platform,
+            creator_url=creator_url,
+            max_items=max_items,
+            headless=headless,
+            use_checkpoint=use_checkpoint,
+            checkpoint_db_path=checkpoint_db_path,
+            account_pool_db_path=account_pool_db_path,
+        )
+
+    payload = await _crawl_once(
+        platform=platform,
+        creator_url=creator_url,
+        max_items=max_items,
+        headless=headless,
+        cookies_path=cookies_path,
+        use_checkpoint=use_checkpoint,
+        checkpoint_db_path=checkpoint_db_path,
+    )
+    return payload
+
+
+async def _crawl_once(
+    *,
+    platform: Platform,
+    creator_url: str,
+    max_items: int,
+    headless: bool,
+    cookies_path: str | None,
+    use_checkpoint: bool,
+    checkpoint_db_path: str,
 ) -> dict:
     checkpoint: dict | None = None
     if platform == "xiaohongshu" and use_checkpoint and max_items == 0:
@@ -66,6 +105,93 @@ async def crawl_creator(
     return result.to_dict()
 
 
+async def _crawl_with_account_pool(
+    *,
+    platform: Platform,
+    creator_url: str,
+    max_items: int,
+    headless: bool,
+    use_checkpoint: bool,
+    checkpoint_db_path: str,
+    account_pool_db_path: str,
+) -> dict:
+    accounts = list_crawl_accounts(
+        platform=platform,
+        enabled_only=True,
+        db_path=account_pool_db_path,
+    )
+    if not accounts:
+        raise RuntimeError(f"no enabled crawl accounts for platform={platform}")
+
+    errors: list[str] = []
+    for account in accounts:
+        account_id = account["id"]
+        account_name = account["account_name"]
+        cookies_path = account["cookies_path"]
+        try:
+            payload = await _crawl_once(
+                platform=platform,
+                creator_url=creator_url,
+                max_items=max_items,
+                headless=headless,
+                cookies_path=cookies_path,
+                use_checkpoint=use_checkpoint,
+                checkpoint_db_path=checkpoint_db_path,
+            )
+        except Exception as exc:  # noqa: BLE001
+            mark_crawl_account_result(
+                account_id=account_id,
+                success=False,
+                health="error",
+                error=str(exc),
+                db_path=account_pool_db_path,
+            )
+            errors.append(f"account={account_name} error={exc}")
+            continue
+
+        success, health, error = _evaluate_crawl_health(platform=platform, payload=payload)
+        mark_crawl_account_result(
+            account_id=account_id,
+            success=success,
+            health=health,
+            error=error,
+            db_path=account_pool_db_path,
+        )
+        payload.setdefault("crawler_meta", {})
+        payload["crawler_meta"]["account"] = {
+            "id": account_id,
+            "account_name": account_name,
+            "cookies_path": cookies_path,
+            "health": health,
+            "success": success,
+            "error": error,
+        }
+        if success:
+            return payload
+        errors.append(f"account={account_name} health={health} error={error}")
+
+    raise RuntimeError("all crawl accounts failed: " + " | ".join(errors))
+
+
+def _evaluate_crawl_health(*, platform: Platform, payload: dict) -> tuple[bool, str, str | None]:
+    crawler_meta = payload.get("crawler_meta", {})
+    session = crawler_meta.get("session", {}) if isinstance(crawler_meta, dict) else {}
+    session_status = session.get("runtime_status")
+    cookie_health = session.get("cookie_health")
+    warnings = session.get("warnings")
+    posts = payload.get("posts", [])
+    post_count = len(posts) if isinstance(posts, list) else 0
+
+    if cookie_health == "expired":
+        return False, "expired", "cookie expired"
+    if session_status == "limited":
+        return False, "limited", "session limited"
+    if platform == "xiaohongshu" and post_count == 0:
+        warn_text = ", ".join(str(x) for x in warnings) if isinstance(warnings, list) else "no posts"
+        return False, "no_data", warn_text
+    return True, str(session_status or cookie_health or "ok"), None
+
+
 def crawl_creator_sync(
     *,
     platform: Platform,
@@ -75,6 +201,8 @@ def crawl_creator_sync(
     cookies_path: str | None = None,
     use_checkpoint: bool = True,
     checkpoint_db_path: str = "data/crawler.db",
+    use_account_pool: bool = False,
+    account_pool_db_path: str = "data/crawler.db",
 ) -> dict:
     return asyncio.run(
         crawl_creator(
@@ -85,6 +213,8 @@ def crawl_creator_sync(
             cookies_path=cookies_path,
             use_checkpoint=use_checkpoint,
             checkpoint_db_path=checkpoint_db_path,
+            use_account_pool=use_account_pool,
+            account_pool_db_path=account_pool_db_path,
         )
     )
 
@@ -122,6 +252,49 @@ def list_creator_ids(
     )
 
 
+def add_crawl_account(
+    *,
+    platform: Platform,
+    account_name: str,
+    cookies_path: str,
+    db_path: str = "data/crawler.db",
+    enabled: bool = True,
+    priority: int = 100,
+    metadata: dict | None = None,
+) -> dict:
+    return register_crawl_account(
+        platform=platform,
+        account_name=account_name,
+        cookies_path=cookies_path,
+        db_path=db_path,
+        enabled=enabled,
+        priority=priority,
+        metadata=metadata,
+    )
+
+
+def list_crawl_account_pool(
+    *,
+    db_path: str = "data/crawler.db",
+    platform: Platform | None = None,
+    enabled_only: bool = False,
+) -> list[dict]:
+    return list_crawl_accounts(
+        db_path=db_path,
+        platform=platform,
+        enabled_only=enabled_only,
+    )
+
+
+def toggle_crawl_account(
+    *,
+    account_id: int,
+    enabled: bool,
+    db_path: str = "data/crawler.db",
+) -> None:
+    set_crawl_account_enabled(account_id=account_id, enabled=enabled, db_path=db_path)
+
+
 async def crawl_creator_by_id(
     *,
     platform: Platform,
@@ -131,6 +304,8 @@ async def crawl_creator_by_id(
     cookies_path: str | None = None,
     use_checkpoint: bool = True,
     checkpoint_db_path: str = "data/crawler.db",
+    use_account_pool: bool = False,
+    account_pool_db_path: str = "data/crawler.db",
 ) -> dict:
     creator_url = build_creator_url(platform, creator_id)
     return await crawl_creator(
@@ -141,6 +316,8 @@ async def crawl_creator_by_id(
         cookies_path=cookies_path,
         use_checkpoint=use_checkpoint,
         checkpoint_db_path=checkpoint_db_path,
+        use_account_pool=use_account_pool,
+        account_pool_db_path=account_pool_db_path,
     )
 
 
@@ -153,6 +330,8 @@ def crawl_creator_by_id_sync(
     cookies_path: str | None = None,
     use_checkpoint: bool = True,
     checkpoint_db_path: str = "data/crawler.db",
+    use_account_pool: bool = False,
+    account_pool_db_path: str = "data/crawler.db",
 ) -> dict:
     return asyncio.run(
         crawl_creator_by_id(
@@ -163,6 +342,8 @@ def crawl_creator_by_id_sync(
             cookies_path=cookies_path,
             use_checkpoint=use_checkpoint,
             checkpoint_db_path=checkpoint_db_path,
+            use_account_pool=use_account_pool,
+            account_pool_db_path=account_pool_db_path,
         )
     )
 
@@ -178,6 +359,7 @@ async def crawl_creator_and_store(
     download_media: bool = False,
     media_root: str = "data/media",
     use_checkpoint: bool = True,
+    use_account_pool: bool = False,
 ) -> dict:
     payload = await crawl_creator(
         platform=platform,
@@ -187,6 +369,8 @@ async def crawl_creator_and_store(
         cookies_path=cookies_path,
         use_checkpoint=use_checkpoint,
         checkpoint_db_path=db_path,
+        use_account_pool=use_account_pool,
+        account_pool_db_path=db_path,
     )
     media_result: dict | None = None
     if download_media:
@@ -213,6 +397,7 @@ def crawl_creator_and_store_sync(
     download_media: bool = False,
     media_root: str = "data/media",
     use_checkpoint: bool = True,
+    use_account_pool: bool = False,
 ) -> dict:
     return asyncio.run(
         crawl_creator_and_store(
@@ -225,6 +410,7 @@ def crawl_creator_and_store_sync(
             download_media=download_media,
             media_root=media_root,
             use_checkpoint=use_checkpoint,
+            use_account_pool=use_account_pool,
         )
     )
 
@@ -240,6 +426,7 @@ async def crawl_creator_by_id_and_store(
     download_media: bool = False,
     media_root: str = "data/media",
     use_checkpoint: bool = True,
+    use_account_pool: bool = False,
 ) -> dict:
     creator_url = build_creator_url(platform, creator_id)
     # Ensure backend creator registry has this id for later scheduling/management.
@@ -259,6 +446,7 @@ async def crawl_creator_by_id_and_store(
         download_media=download_media,
         media_root=media_root,
         use_checkpoint=use_checkpoint,
+        use_account_pool=use_account_pool,
     )
     crawl_time_utc = result["crawl"].get("crawl_time_utc")
     if isinstance(crawl_time_utc, str) and crawl_time_utc:
@@ -282,6 +470,7 @@ def crawl_creator_by_id_and_store_sync(
     download_media: bool = False,
     media_root: str = "data/media",
     use_checkpoint: bool = True,
+    use_account_pool: bool = False,
 ) -> dict:
     return asyncio.run(
         crawl_creator_by_id_and_store(
@@ -294,6 +483,7 @@ def crawl_creator_by_id_and_store_sync(
             download_media=download_media,
             media_root=media_root,
             use_checkpoint=use_checkpoint,
+            use_account_pool=use_account_pool,
         )
     )
 

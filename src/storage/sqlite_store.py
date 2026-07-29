@@ -32,6 +32,27 @@ def init_sqlite_db(db_path: str = DEFAULT_DB_PATH) -> None:
             CREATE INDEX IF NOT EXISTS idx_creators_platform_enabled
               ON creators(platform, enabled);
 
+            CREATE TABLE IF NOT EXISTS crawl_accounts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform TEXT NOT NULL,
+                account_name TEXT NOT NULL,
+                cookies_path TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                priority INTEGER NOT NULL DEFAULT 100,
+                fail_count INTEGER NOT NULL DEFAULT 0,
+                success_count INTEGER NOT NULL DEFAULT 0,
+                last_used_at_utc TEXT,
+                last_health TEXT,
+                last_error TEXT,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at_utc TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at_utc TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(platform, account_name)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_crawl_accounts_platform_enabled
+              ON crawl_accounts(platform, enabled, priority, last_used_at_utc);
+
             CREATE TABLE IF NOT EXISTS crawl_checkpoints (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 platform TEXT NOT NULL,
@@ -391,6 +412,173 @@ def set_creator_enabled(
         conn.commit()
 
 
+def register_crawl_account(
+    *,
+    platform: str,
+    account_name: str,
+    cookies_path: str,
+    enabled: bool = True,
+    priority: int = 100,
+    metadata: dict[str, Any] | None = None,
+    db_path: str = DEFAULT_DB_PATH,
+) -> dict[str, Any]:
+    if not account_name.strip():
+        raise ValueError("account_name cannot be empty")
+    if not cookies_path.strip():
+        raise ValueError("cookies_path cannot be empty")
+
+    init_sqlite_db(db_path=db_path)
+    metadata_payload = metadata or {}
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO crawl_accounts (
+                platform,
+                account_name,
+                cookies_path,
+                enabled,
+                priority,
+                metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(platform, account_name) DO UPDATE SET
+                cookies_path = excluded.cookies_path,
+                enabled = excluded.enabled,
+                priority = excluded.priority,
+                metadata_json = excluded.metadata_json,
+                updated_at_utc = datetime('now')
+            """,
+            (
+                platform,
+                account_name,
+                cookies_path,
+                1 if enabled else 0,
+                priority,
+                json.dumps(metadata_payload, ensure_ascii=False),
+            ),
+        )
+        row = conn.execute(
+            """
+            SELECT
+                id,
+                platform,
+                account_name,
+                cookies_path,
+                enabled,
+                priority,
+                fail_count,
+                success_count,
+                last_used_at_utc,
+                last_health,
+                last_error,
+                metadata_json,
+                created_at_utc,
+                updated_at_utc
+            FROM crawl_accounts
+            WHERE platform = ? AND account_name = ?
+            """,
+            (platform, account_name),
+        ).fetchone()
+
+    if row is None:
+        raise RuntimeError("failed to register crawl account")
+    return _crawl_account_row_to_dict(row)
+
+
+def list_crawl_accounts(
+    *,
+    platform: str | None = None,
+    enabled_only: bool = False,
+    db_path: str = DEFAULT_DB_PATH,
+) -> list[dict[str, Any]]:
+    init_sqlite_db(db_path=db_path)
+    query = """
+        SELECT
+            id,
+            platform,
+            account_name,
+            cookies_path,
+            enabled,
+            priority,
+            fail_count,
+            success_count,
+            last_used_at_utc,
+            last_health,
+            last_error,
+            metadata_json,
+            created_at_utc,
+            updated_at_utc
+        FROM crawl_accounts
+    """
+    filters: list[str] = []
+    params: list[Any] = []
+    if platform:
+        filters.append("platform = ?")
+        params.append(platform)
+    if enabled_only:
+        filters.append("enabled = 1")
+    if filters:
+        query += " WHERE " + " AND ".join(filters)
+    query += " ORDER BY priority ASC, COALESCE(last_used_at_utc, ''), id ASC"
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [_crawl_account_row_to_dict(row) for row in rows]
+
+
+def set_crawl_account_enabled(
+    *,
+    account_id: int,
+    enabled: bool,
+    db_path: str = DEFAULT_DB_PATH,
+) -> None:
+    init_sqlite_db(db_path=db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE crawl_accounts
+            SET
+                enabled = ?,
+                updated_at_utc = datetime('now')
+            WHERE id = ?
+            """,
+            (1 if enabled else 0, account_id),
+        )
+        conn.commit()
+
+
+def mark_crawl_account_result(
+    *,
+    account_id: int,
+    success: bool,
+    health: str | None = None,
+    error: str | None = None,
+    db_path: str = DEFAULT_DB_PATH,
+) -> None:
+    init_sqlite_db(db_path=db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE crawl_accounts
+            SET
+                success_count = success_count + ?,
+                fail_count = fail_count + ?,
+                last_used_at_utc = datetime('now'),
+                last_health = ?,
+                last_error = ?,
+                updated_at_utc = datetime('now')
+            WHERE id = ?
+            """,
+            (
+                1 if success else 0,
+                0 if success else 1,
+                health,
+                error,
+                account_id,
+            ),
+        )
+        conn.commit()
+
+
 def get_crawl_checkpoint(
     *,
     platform: str,
@@ -467,6 +655,30 @@ def _creator_row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
         "last_crawl_time_utc": row[6],
         "created_at_utc": row[7],
         "updated_at_utc": row[8],
+    }
+
+
+def _crawl_account_row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
+    metadata_text = row[11] if isinstance(row[11], str) else "{}"
+    try:
+        metadata = json.loads(metadata_text)
+    except json.JSONDecodeError:
+        metadata = {}
+    return {
+        "id": row[0],
+        "platform": row[1],
+        "account_name": row[2],
+        "cookies_path": row[3],
+        "enabled": bool(row[4]),
+        "priority": row[5],
+        "fail_count": row[6],
+        "success_count": row[7],
+        "last_used_at_utc": row[8],
+        "last_health": row[9],
+        "last_error": row[10],
+        "metadata": metadata,
+        "created_at_utc": row[12],
+        "updated_at_utc": row[13],
     }
 
 

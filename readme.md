@@ -42,6 +42,7 @@ python -m src.admin_web
 Then open `http://127.0.0.1:8000` to:
 
 - add/enable/disable creators
+- manage crawl account pool (multi-account rotation)
 - trigger crawl jobs
 - inspect per-run diff summary (`new/updated/missing`)
 - inspect media download status
@@ -119,6 +120,7 @@ result = crawl_creator_by_id_and_store_sync(
     creator_id="<creator_id>",
     max_items=20,  # set 0 for continuous deep pagination
     use_checkpoint=True,  # resume from saved pagination checkpoint when max_items=0
+    use_account_pool=True,  # use enabled accounts in crawl_accounts table
     db_path=DB_PATH,
     download_media=True,
     media_root="data/media",
@@ -128,6 +130,30 @@ print(result["storage"])
 print(result["media"])
 print(result["storage"]["diff"])
 print(list_creator_ids(db_path=DB_PATH, platform="xiaohongshu"))
+```
+
+### Add Crawl Accounts (Account Pool)
+
+```python
+from src import add_crawl_account, list_crawl_account_pool
+
+DB_PATH = "data/crawler.db"
+add_crawl_account(
+    platform="xiaohongshu",
+    account_name="xhs_main_01",
+    cookies_path="cookies/xhs_main_01.json",
+    db_path=DB_PATH,
+    priority=100,
+)
+add_crawl_account(
+    platform="xiaohongshu",
+    account_name="xhs_backup_01",
+    cookies_path="cookies/xhs_backup_01.json",
+    db_path=DB_PATH,
+    priority=200,
+)
+
+print(list_crawl_account_pool(db_path=DB_PATH, platform="xiaohongshu", enabled_only=True))
 ```
 
 ### Save Existing Payload to SQLite
@@ -185,5 +211,6 @@ save_creator_content(payload, db_path="data/crawler.db")
 - Checkpoint stores a recent post URL window (up to 200 URLs) for incremental resume.
 - Crawler metadata now includes session diagnostics (`crawler_meta.session`) and pagination diagnostics (`crawler_meta.pagination`).
 - Built-in retry/backoff and jitter delays are enabled to reduce transient anti-bot failures.
+- Multi-account pool is supported via `crawl_accounts`; when `use_account_pool=True`, accounts are tried in priority order and auto-switched on failure.
 - Diff data for each run is persisted in `crawl_diffs` and `crawl_diff_items`, and also returned in `result["storage"]["diff"]` (`new/updated/unchanged/missing`).
 - For stable production crawling, combine browser automation with request-level API parsing and retry strategy.
