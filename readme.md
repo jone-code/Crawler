@@ -16,6 +16,7 @@ This project crawls creator post lists from:
 - Optional media downloading (images/videos)
 - Built-in admin web page (creator management + crawl runs + diff view)
 - Account pool + proxy pool rotation for anti-bot resilience
+- Procurement reference for proxy vendors and acceptance checklist (`proxy_pool_procurement.md`)
 
 ## Environment
 
@@ -243,3 +244,7 @@ save_creator_content(payload, db_path="data/crawler.db")
 - `use_account_pool=True` and `use_proxy_pool=True` can be enabled together to run account + proxy joint rotation.
 - Diff data for each run is persisted in `crawl_diffs` and `crawl_diff_items`, and also returned in `result["storage"]["diff"]` (`new/updated/unchanged/missing`).
 - For stable production crawling, combine browser automation with request-level API parsing and retry strategy.
+
+## Project Records
+
+- Proxy pool procurement guide: `proxy_pool_procurement.md`
