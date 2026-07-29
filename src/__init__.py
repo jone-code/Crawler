@@ -15,6 +15,8 @@ from .service import (
     list_crawl_account_pool,
     list_crawl_proxy_pool,
     list_creator_ids,
+    probe_pool_health,
+    probe_pool_health_sync,
     toggle_crawl_account,
     toggle_crawl_proxy,
 )
@@ -57,6 +59,8 @@ __all__ = [
     "list_crawl_proxy_pool",
     "toggle_crawl_account",
     "toggle_crawl_proxy",
+    "probe_pool_health",
+    "probe_pool_health_sync",
     "download_post_media",
     "init_sqlite_db",
     "save_creator_content",

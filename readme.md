@@ -17,6 +17,7 @@ This project crawls creator post lists from:
 - Built-in admin web page (creator management + crawl runs + diff view)
 - Account pool + proxy pool rotation for anti-bot resilience
 - P0 resilience scheduler: cooldown circuit-breaker + weighted scoring
+- Active pool health check API/admin action for account/proxy probing
 - Procurement reference for proxy vendors and acceptance checklist (`proxy_pool_procurement.md`)
 
 ## Environment
@@ -47,6 +48,7 @@ Then open `http://127.0.0.1:8000` to:
 - add/enable/disable creators
 - manage crawl account pool (multi-account rotation)
 - manage crawl proxy pool (multi-proxy rotation)
+- run one-click pool health checks (accounts/proxies)
 - trigger crawl jobs
 - inspect per-run diff summary (`new/updated/missing`)
 - inspect media download status
@@ -185,6 +187,21 @@ add_crawl_proxy(
 print(list_crawl_proxy_pool(db_path=DB_PATH, platform="xiaohongshu", enabled_only=True))
 ```
 
+### Run Pool Health Check (P0)
+
+```python
+from src import probe_pool_health_sync
+
+summary = probe_pool_health_sync(
+    platform="xiaohongshu",
+    db_path="data/crawler.db",
+    probe_accounts=True,
+    probe_proxies=True,
+    timeout_ms=12000,
+)
+print(summary)
+```
+
 ### Save Existing Payload to SQLite
 
 ```python
@@ -245,6 +262,7 @@ save_creator_content(payload, db_path="data/crawler.db")
 - `use_account_pool=True` and `use_proxy_pool=True` can be enabled together to run account + proxy joint rotation.
 - Runtime scheduler now applies cooldown circuit-breaker and weighted score selection based on priority, success/failure history, fail streak, and latency.
 - Retry backoff is now classified by error type (timeout/proxy/rate-limit/access-limit) with differentiated wait intervals.
+- `probe_pool_health_sync` provides active runtime probes and writes health/cooldown updates back to pool records.
 - Diff data for each run is persisted in `crawl_diffs` and `crawl_diff_items`, and also returned in `result["storage"]["diff"]` (`new/updated/unchanged/missing`).
 - For stable production crawling, combine browser automation with request-level API parsing and retry strategy.
 

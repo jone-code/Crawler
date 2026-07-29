@@ -85,6 +85,23 @@
       </div>
 
       <div class="card">
+        <h2>池子健康检查（P0）</h2>
+        <form method="post" action="/pool-health-check">
+          <label>平台</label>
+          <select name="platform" required>
+            <option value="xiaohongshu">xiaohongshu</option>
+            <option value="douyin">douyin</option>
+          </select>
+          <label>探测超时（毫秒）</label>
+          <input type="number" name="timeout_ms" value="12000" min="3000" max="60000" />
+          <label><input type="checkbox" name="probe_accounts" checked style="width:auto;" /> 探测账号池</label>
+          <label><input type="checkbox" name="probe_proxies" checked style="width:auto;" /> 探测代理池</label>
+          <label><input type="checkbox" name="headless" checked style="width:auto;" /> Headless</label>
+          <button type="submit">执行健康检查</button>
+        </form>
+      </div>
+
+      <div class="card">
         <h2>添加/更新抓取账号</h2>
         <form method="post" action="/accounts">
           <label>平台</label>

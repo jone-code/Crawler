@@ -6,6 +6,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Literal
 
+from playwright.async_api import async_playwright
+
 from .crawlers import DouyinCrawler, XiaohongshuCrawler
 from .media_downloader import download_post_media
 from .storage import (
@@ -496,6 +498,106 @@ def _cooldown_for_failure_kind(failure_kind: str | None) -> tuple[int | None, in
     return 180, 300
 
 
+async def _probe_runtime_entry(
+    *,
+    platform: Platform,
+    cookies_path: str | None,
+    proxy_server: str | None,
+    timeout_ms: int,
+    headless: bool,
+) -> dict[str, Any]:
+    probe_url = _platform_probe_url(platform)
+    crawler = create_crawler(
+        platform=platform,
+        headless=headless,
+        cookies_path=cookies_path,
+        proxy_server=proxy_server,
+    )
+    started_at = time.monotonic()
+    context = None
+    browser = None
+    status_code: int | None = None
+    title: str | None = None
+    try:
+        async with async_playwright() as playwright:
+            launch_kwargs: dict[str, Any] = {"headless": headless}
+            if proxy_server:
+                launch_kwargs["proxy"] = crawler._build_proxy_settings(proxy_server)
+            browser = await playwright.chromium.launch(**launch_kwargs)
+            context = await crawler._new_context(browser, probe_url)
+            page = await context.new_page()
+            response = await page.goto(probe_url, wait_until="domcontentloaded", timeout=timeout_ms)
+            title = await page.title()
+            status_code = response.status if response else None
+            session = crawler.crawler_meta.get("session", {})
+            cookie_health = session.get("cookie_health") if isinstance(session, dict) else None
+            if cookie_health == "expired":
+                health = "expired"
+                error = "cookie expired"
+                success = False
+            elif status_code in {401, 403, 429} or _looks_access_limited_title(title):
+                health = "limited"
+                error = f"probe blocked status={status_code}"
+                success = False
+            else:
+                health = "probe_ok"
+                error = None
+                success = True
+    except Exception as exc:  # noqa: BLE001
+        success = False
+        health = "error"
+        error = str(exc)
+        failure_kind = _classify_failure_kind(health=health, error=error, exc=exc)
+    else:
+        failure_kind = None if success else _classify_failure_kind(health=health, error=error, exc=None)
+    finally:
+        latency_ms = int((time.monotonic() - started_at) * 1000)
+        if context is not None:
+            try:
+                await context.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if browser is not None:
+            try:
+                await browser.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    return {
+        "success": success,
+        "health": health,
+        "error": error,
+        "failure_kind": failure_kind,
+        "latency_ms": latency_ms,
+        "probe_url": probe_url,
+        "status_code": status_code,
+        "title": title,
+    }
+
+
+def _platform_probe_url(platform: Platform) -> str:
+    if platform == "xiaohongshu":
+        return "https://www.xiaohongshu.com"
+    if platform == "douyin":
+        return "https://www.douyin.com"
+    raise ValueError(f"Unsupported platform: {platform}")
+
+
+def _looks_access_limited_title(value: str | None) -> bool:
+    if not isinstance(value, str):
+        return False
+    text = value.lower()
+    blocked_keywords = [
+        "captcha",
+        "验证",
+        "访问受限",
+        "forbidden",
+        "denied",
+        "安全验证",
+    ]
+    return any(keyword in text for keyword in blocked_keywords)
+
+
 def _evaluate_crawl_health(*, platform: Platform, payload: dict) -> tuple[bool, str, str | None]:
     crawler_meta = payload.get("crawler_meta", {})
     session = crawler_meta.get("session", {}) if isinstance(crawler_meta, dict) else {}
@@ -663,6 +765,124 @@ def toggle_crawl_proxy(
     db_path: str = "data/crawler.db",
 ) -> None:
     set_crawl_proxy_enabled(proxy_id=proxy_id, enabled=enabled, db_path=db_path)
+
+
+async def probe_pool_health(
+    *,
+    platform: Platform,
+    db_path: str = "data/crawler.db",
+    probe_accounts: bool = True,
+    probe_proxies: bool = True,
+    timeout_ms: int = 12000,
+    headless: bool = True,
+) -> dict[str, Any]:
+    if not probe_accounts and not probe_proxies:
+        raise ValueError("at least one of probe_accounts/probe_proxies must be true")
+
+    summary: dict[str, Any] = {
+        "platform": platform,
+        "probe_time_utc": datetime.now(timezone.utc).isoformat(),
+        "timeout_ms": timeout_ms,
+        "headless": headless,
+        "accounts": [],
+        "proxies": [],
+    }
+
+    if probe_accounts:
+        accounts = list_crawl_accounts(
+            platform=platform,
+            enabled_only=True,
+            db_path=db_path,
+        )
+        for account in accounts:
+            result = await _probe_runtime_entry(
+                platform=platform,
+                cookies_path=account["cookies_path"],
+                proxy_server=None,
+                timeout_ms=timeout_ms,
+                headless=headless,
+            )
+            account_row = {
+                "id": account["id"],
+                "account_name": account["account_name"],
+                **result,
+            }
+            summary["accounts"].append(account_row)
+            account_cd, _ = _cooldown_for_failure_kind(result["failure_kind"])
+            mark_crawl_account_result(
+                account_id=account["id"],
+                success=result["success"],
+                health=result["health"],
+                error=result["error"],
+                failure_kind=result["failure_kind"],
+                cooldown_seconds=account_cd,
+                latency_ms=result["latency_ms"],
+                db_path=db_path,
+            )
+
+    if probe_proxies:
+        proxies = list_crawl_proxies(
+            platform=platform,
+            enabled_only=True,
+            db_path=db_path,
+        )
+        for proxy in proxies:
+            result = await _probe_runtime_entry(
+                platform=platform,
+                cookies_path=None,
+                proxy_server=proxy["proxy_url"],
+                timeout_ms=timeout_ms,
+                headless=headless,
+            )
+            proxy_row = {
+                "id": proxy["id"],
+                "proxy_name": proxy["proxy_name"],
+                "proxy_server": proxy["proxy_url"],
+                **result,
+            }
+            summary["proxies"].append(proxy_row)
+            _, proxy_cd = _cooldown_for_failure_kind(result["failure_kind"])
+            mark_crawl_proxy_result(
+                proxy_id=proxy["id"],
+                success=result["success"],
+                health=result["health"],
+                error=result["error"],
+                failure_kind=result["failure_kind"],
+                cooldown_seconds=proxy_cd,
+                latency_ms=result["latency_ms"],
+                db_path=db_path,
+            )
+
+    summary["account_probe_count"] = len(summary["accounts"])
+    summary["proxy_probe_count"] = len(summary["proxies"])
+    summary["account_ok_count"] = sum(
+        1 for item in summary["accounts"] if isinstance(item, dict) and item.get("success")
+    )
+    summary["proxy_ok_count"] = sum(
+        1 for item in summary["proxies"] if isinstance(item, dict) and item.get("success")
+    )
+    return summary
+
+
+def probe_pool_health_sync(
+    *,
+    platform: Platform,
+    db_path: str = "data/crawler.db",
+    probe_accounts: bool = True,
+    probe_proxies: bool = True,
+    timeout_ms: int = 12000,
+    headless: bool = True,
+) -> dict[str, Any]:
+    return asyncio.run(
+        probe_pool_health(
+            platform=platform,
+            db_path=db_path,
+            probe_accounts=probe_accounts,
+            probe_proxies=probe_proxies,
+            timeout_ms=timeout_ms,
+            headless=headless,
+        )
+    )
 
 
 async def crawl_creator_by_id(

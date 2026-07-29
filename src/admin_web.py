@@ -15,6 +15,7 @@ from .service import (
     list_crawl_account_pool,
     list_crawl_proxy_pool,
     list_creator_ids,
+    probe_pool_health_sync,
     toggle_crawl_account,
     toggle_crawl_proxy,
 )
@@ -285,6 +286,51 @@ def create_app(db_path: str | None = None) -> Flask:
         except Exception as exc:  # noqa: BLE001
             flash(f"抓取失败: {exc}", "error")
             return redirect(url_for("dashboard"))
+
+    @app.post("/pool-health-check")
+    def pool_health_check():
+        platform = (request.form.get("platform") or "").strip()
+        probe_accounts = request.form.get("probe_accounts") == "on"
+        probe_proxies = request.form.get("probe_proxies") == "on"
+        headless = request.form.get("headless") == "on"
+        try:
+            timeout_ms = int((request.form.get("timeout_ms") or "12000").strip())
+        except ValueError:
+            timeout_ms = 12000
+        timeout_ms = max(3000, min(timeout_ms, 60000))
+
+        try:
+            summary = probe_pool_health_sync(
+                platform=platform,  # type: ignore[arg-type]
+                db_path=app.config["DB_PATH"],
+                probe_accounts=probe_accounts,
+                probe_proxies=probe_proxies,
+                timeout_ms=timeout_ms,
+                headless=headless,
+            )
+            flash(
+                (
+                    f"健康检查完成: accounts={summary.get('account_ok_count', 0)}/"
+                    f"{summary.get('account_probe_count', 0)} | proxies={summary.get('proxy_ok_count', 0)}/"
+                    f"{summary.get('proxy_probe_count', 0)}"
+                ),
+                "success",
+            )
+            for item in summary.get("accounts", []):
+                if isinstance(item, dict) and not item.get("success"):
+                    flash(
+                        f"账号异常: {item.get('account_name')} | {item.get('failure_kind')} | {item.get('error')}",
+                        "error",
+                    )
+            for item in summary.get("proxies", []):
+                if isinstance(item, dict) and not item.get("success"):
+                    flash(
+                        f"代理异常: {item.get('proxy_name')} | {item.get('failure_kind')} | {item.get('error')}",
+                        "error",
+                    )
+        except Exception as exc:  # noqa: BLE001
+            flash(f"健康检查失败: {exc}", "error")
+        return redirect(url_for("dashboard"))
 
     @app.get("/runs/<int:run_id>")
     def run_detail(run_id: int):
