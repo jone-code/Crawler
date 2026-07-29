@@ -48,10 +48,15 @@ async def crawl_creator(
     headless: bool = True,
     cookies_path: str | None = None,
     use_checkpoint: bool = True,
+    checkpoint_db_path: str = "data/crawler.db",
 ) -> dict:
     checkpoint: dict | None = None
     if platform == "xiaohongshu" and use_checkpoint and max_items == 0:
-        checkpoint = get_crawl_checkpoint(platform=platform, creator_url=creator_url)
+        checkpoint = get_crawl_checkpoint(
+            platform=platform,
+            creator_url=creator_url,
+            db_path=checkpoint_db_path,
+        )
     crawler = create_crawler(
         platform,
         headless=headless,
@@ -69,6 +74,7 @@ def crawl_creator_sync(
     headless: bool = True,
     cookies_path: str | None = None,
     use_checkpoint: bool = True,
+    checkpoint_db_path: str = "data/crawler.db",
 ) -> dict:
     return asyncio.run(
         crawl_creator(
@@ -78,6 +84,7 @@ def crawl_creator_sync(
             headless=headless,
             cookies_path=cookies_path,
             use_checkpoint=use_checkpoint,
+            checkpoint_db_path=checkpoint_db_path,
         )
     )
 
@@ -123,6 +130,7 @@ async def crawl_creator_by_id(
     headless: bool = True,
     cookies_path: str | None = None,
     use_checkpoint: bool = True,
+    checkpoint_db_path: str = "data/crawler.db",
 ) -> dict:
     creator_url = build_creator_url(platform, creator_id)
     return await crawl_creator(
@@ -132,6 +140,7 @@ async def crawl_creator_by_id(
         headless=headless,
         cookies_path=cookies_path,
         use_checkpoint=use_checkpoint,
+        checkpoint_db_path=checkpoint_db_path,
     )
 
 
@@ -143,6 +152,7 @@ def crawl_creator_by_id_sync(
     headless: bool = True,
     cookies_path: str | None = None,
     use_checkpoint: bool = True,
+    checkpoint_db_path: str = "data/crawler.db",
 ) -> dict:
     return asyncio.run(
         crawl_creator_by_id(
@@ -152,6 +162,7 @@ def crawl_creator_by_id_sync(
             headless=headless,
             cookies_path=cookies_path,
             use_checkpoint=use_checkpoint,
+            checkpoint_db_path=checkpoint_db_path,
         )
     )
 
@@ -175,6 +186,7 @@ async def crawl_creator_and_store(
         headless=headless,
         cookies_path=cookies_path,
         use_checkpoint=use_checkpoint,
+        checkpoint_db_path=db_path,
     )
     media_result: dict | None = None
     if download_media:
@@ -307,7 +319,7 @@ def _update_checkpoint_after_run(
     if not post_urls:
         return
     checkpoint_payload = {
-        "known_recent_post_urls": post_urls[:20],
+        "known_recent_post_urls": post_urls[:200],
         "last_seen_post_url": post_urls[0],
         "crawl_time_utc": payload.get("crawl_time_utc"),
     }

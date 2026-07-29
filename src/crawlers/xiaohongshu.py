@@ -107,8 +107,11 @@ class XiaohongshuCrawler(BaseCrawler):
             if target_count is not None and len(cards_map) >= target_count:
                 stop_reason = "target_reached"
                 break
-            if target_count is None and known_recent_urls and checkpoint_hit and cards_map:
-                stop_reason = "checkpoint_hit"
+            if target_count is None and known_recent_urls and checkpoint_hit:
+                if cards_map:
+                    stop_reason = "checkpoint_hit"
+                else:
+                    stop_reason = "checkpoint_hit_no_new_posts"
                 break
 
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")

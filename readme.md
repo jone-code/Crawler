@@ -182,6 +182,7 @@ save_creator_content(payload, db_path="data/crawler.db")
 - Media metadata is stored in `post_media`, and downloaded files are stored under `data/media/<platform>/<creator_id>/<post_id>/`.
 - Set `max_items=0` to enable continuous pagination probing (scroll until multiple rounds have no new posts).
 - For Xiaohongshu deep mode, `use_checkpoint=True` resumes from previous checkpoint to avoid re-scanning old pages.
+- Checkpoint stores a recent post URL window (up to 200 URLs) for incremental resume.
 - Crawler metadata now includes session diagnostics (`crawler_meta.session`) and pagination diagnostics (`crawler_meta.pagination`).
 - Built-in retry/backoff and jitter delays are enabled to reduce transient anti-bot failures.
 - Diff data for each run is persisted in `crawl_diffs` and `crawl_diff_items`, and also returned in `result["storage"]["diff"]` (`new/updated/unchanged/missing`).
