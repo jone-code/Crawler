@@ -961,6 +961,8 @@ def list_pool_health_events(
     db_path: str = DEFAULT_DB_PATH,
     platform: str | None = None,
     resource_type: str | None = None,
+    window_hours: int | None = None,
+    only_failed: bool = False,
     limit: int = 200,
 ) -> list[dict[str, Any]]:
     init_sqlite_db(db_path=db_path)
@@ -989,6 +991,12 @@ def list_pool_health_events(
     if resource_type:
         filters.append("resource_type = ?")
         params.append(resource_type)
+    if isinstance(window_hours, int) and window_hours > 0:
+        effective_hours = max(1, min(window_hours, 24 * 30))
+        filters.append("checked_at_utc >= datetime('now', ?)")
+        params.append(f"-{effective_hours} hours")
+    if only_failed:
+        filters.append("success = 0")
     if filters:
         query += " WHERE " + " AND ".join(filters)
     query += " ORDER BY id DESC LIMIT ?"
@@ -1020,7 +1028,9 @@ def list_pool_health_trends(
     *,
     db_path: str = DEFAULT_DB_PATH,
     platform: str | None = None,
+    resource_type: str | None = None,
     window_hours: int = 24,
+    only_anomalies: bool = False,
     limit: int = 200,
 ) -> list[dict[str, Any]]:
     init_sqlite_db(db_path=db_path)
@@ -1034,6 +1044,7 @@ def list_pool_health_trends(
             e.resource_name,
             COUNT(*) AS total_checks,
             SUM(CASE WHEN e.success = 1 THEN 1 ELSE 0 END) AS success_count,
+            SUM(CASE WHEN e.success = 0 THEN 1 ELSE 0 END) AS fail_count,
             ROUND(
                 100.0 * SUM(CASE WHEN e.success = 1 THEN 1 ELSE 0 END) / COUNT(*),
                 2
@@ -1065,12 +1076,21 @@ def list_pool_health_trends(
     if platform:
         query += " AND e.platform = ?"
         params.append(platform)
+    if resource_type:
+        query += " AND e.resource_type = ?"
+        params.append(resource_type)
     query += """
         GROUP BY
             e.platform,
             e.resource_type,
             e.resource_id,
             e.resource_name
+    """
+    if only_anomalies:
+        query += """
+        HAVING SUM(CASE WHEN e.success = 0 THEN 1 ELSE 0 END) > 0
+        """
+    query += """
         ORDER BY
             success_rate_pct ASC,
             total_checks DESC,
@@ -1089,11 +1109,12 @@ def list_pool_health_trends(
             "resource_name": row[3],
             "total_checks": row[4],
             "success_count": row[5],
-            "success_rate_pct": row[6],
-            "avg_latency_ms": row[7],
-            "last_checked_at_utc": row[8],
-            "last_health": row[9],
-            "last_failure_kind": row[10],
+            "fail_count": row[6],
+            "success_rate_pct": row[7],
+            "avg_latency_ms": row[8],
+            "last_checked_at_utc": row[9],
+            "last_health": row[10],
+            "last_failure_kind": row[11],
         }
         for row in rows
     ]

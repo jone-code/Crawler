@@ -775,12 +775,16 @@ def list_pool_health_history(
     db_path: str = "data/crawler.db",
     platform: Platform | None = None,
     resource_type: str | None = None,
+    window_hours: int | None = None,
+    only_failed: bool = False,
     limit: int = 200,
 ) -> list[dict[str, Any]]:
     return list_pool_health_events(
         db_path=db_path,
         platform=platform,
         resource_type=resource_type,
+        window_hours=window_hours,
+        only_failed=only_failed,
         limit=limit,
     )
 
@@ -789,13 +793,17 @@ def list_pool_health_trend(
     *,
     db_path: str = "data/crawler.db",
     platform: Platform | None = None,
+    resource_type: str | None = None,
     window_hours: int = 24,
+    only_anomalies: bool = False,
     limit: int = 200,
 ) -> list[dict[str, Any]]:
     return list_pool_health_trends(
         db_path=db_path,
         platform=platform,
+        resource_type=resource_type,
         window_hours=window_hours,
+        only_anomalies=only_anomalies,
         limit=limit,
     )
 

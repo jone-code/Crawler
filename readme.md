@@ -265,6 +265,7 @@ save_creator_content(payload, db_path="data/crawler.db")
 - Retry backoff is now classified by error type (timeout/proxy/rate-limit/access-limit) with differentiated wait intervals.
 - `probe_pool_health_sync` provides active runtime probes and writes health/cooldown updates back to pool records.
 - Health probe events are persisted in `pool_health_events` and surfaced as 24h trend + recent event tables in admin.
+- Admin health views support platform/type filter, anomaly-only filter, and window switch (24h/72h/7d).
 - Diff data for each run is persisted in `crawl_diffs` and `crawl_diff_items`, and also returned in `result["storage"]["diff"]` (`new/updated/unchanged/missing`).
 - For stable production crawling, combine browser automation with request-level API parsing and retry strategy.
 

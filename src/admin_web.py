@@ -35,16 +35,39 @@ def create_app(db_path: str | None = None) -> Flask:
 
     @app.get("/")
     def dashboard():
+        health_platform_raw = (request.args.get("health_platform") or "").strip().lower()
+        health_platform = health_platform_raw if health_platform_raw in {"xiaohongshu", "douyin"} else None
+        health_resource_type_raw = (request.args.get("health_resource_type") or "").strip().lower()
+        health_resource_type = (
+            health_resource_type_raw
+            if health_resource_type_raw in {"account", "proxy"}
+            else None
+        )
+        window_raw = (request.args.get("health_window_hours") or "24").strip()
+        try:
+            parsed_window = int(window_raw)
+        except ValueError:
+            parsed_window = 24
+        health_window_hours = parsed_window if parsed_window in {24, 72, 168} else 24
+        only_abnormal = (request.args.get("only_abnormal") or "").strip() == "1"
+
         creators = list_creator_ids(db_path=app.config["DB_PATH"], enabled_only=False)
         accounts = list_crawl_account_pool(db_path=app.config["DB_PATH"], enabled_only=False)
         proxies = list_crawl_proxy_pool(db_path=app.config["DB_PATH"], enabled_only=False)
         pool_health_history = list_pool_health_history(
             db_path=app.config["DB_PATH"],
+            platform=health_platform,  # type: ignore[arg-type]
+            resource_type=health_resource_type,
+            window_hours=health_window_hours,
+            only_failed=only_abnormal,
             limit=100,
         )
         pool_health_trend = list_pool_health_trend(
             db_path=app.config["DB_PATH"],
-            window_hours=24,
+            platform=health_platform,  # type: ignore[arg-type]
+            resource_type=health_resource_type,
+            window_hours=health_window_hours,
+            only_anomalies=only_abnormal,
             limit=100,
         )
         recent_runs = _list_recent_runs(app.config["DB_PATH"], limit=50)
@@ -55,6 +78,10 @@ def create_app(db_path: str | None = None) -> Flask:
             proxies=proxies,
             pool_health_history=pool_health_history,
             pool_health_trend=pool_health_trend,
+            health_filter_platform=health_platform_raw or "all",
+            health_filter_resource_type=health_resource_type_raw or "all",
+            health_filter_window_hours=health_window_hours,
+            health_filter_only_abnormal=only_abnormal,
             recent_runs=recent_runs,
             default_db_path=app.config["DB_PATH"],
         )
