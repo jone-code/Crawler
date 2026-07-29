@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Run {{ run.id }} Detail</title>
+    <style>
+      body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 24px; background: #f5f7fb; color: #1f2937; }
+      .card { background: white; border-radius: 10px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.08); margin-bottom: 14px; }
+      h1, h2 { margin-top: 0; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { padding: 9px; border-bottom: 1px solid #e5e7eb; text-align: left; vertical-align: top; font-size: 13px; }
+      th { background: #f9fafb; }
+      .muted { color: #6b7280; font-size: 12px; }
+      .change-new { color: #166534; font-weight: 600; }
+      .change-updated { color: #92400e; font-weight: 600; }
+      .change-missing { color: #991b1b; font-weight: 600; }
+      code { background: #eef2ff; padding: 2px 6px; border-radius: 6px; }
+      a { color: #1d4ed8; text-decoration: none; }
+    </style>
+  </head>
+  <body>
+    <p><a href="/">← 返回首页</a></p>
+    <h1>Run #{{ run.id }}</h1>
+
+    <div class="card">
+      <h2>基础信息</h2>
+      <p><strong>平台:</strong> {{ run.platform }}</p>
+      <p><strong>博主:</strong> {{ run.creator_name or "-" }}</p>
+      <p><strong>主页:</strong> <a href="{{ run.creator_url }}" target="_blank">{{ run.creator_url }}</a></p>
+      <p><strong>crawl_time_utc:</strong> {{ run.crawl_time_utc }}</p>
+      <p><strong>posts:</strong> {{ run.post_count }} | <strong>media:</strong> {{ run.media_count }}</p>
+    </div>
+
+    <div class="card">
+      <h2>Diff 汇总</h2>
+      <p>
+        new={{ run.new_count }} /
+        updated={{ run.updated_count }} /
+        unchanged={{ run.unchanged_count }} /
+        missing={{ run.missing_count }}
+      </p>
+      {% if run.summary %}
+      <p class="muted">summary_json 可用于接口返回聚合展示。</p>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <h2>媒体下载状态</h2>
+      <table>
+        <thead><tr><th>状态</th><th>数量</th></tr></thead>
+        <tbody>
+          {% for row in media_stats %}
+          <tr><td>{{ row.download_status }}</td><td>{{ row.count }}</td></tr>
+          {% else %}
+          <tr><td colspan="2">无媒体记录</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>Diff 明细（最多 1000 条）</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>变化类型</th>
+            <th>post_id</th>
+            <th>post_url</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in diff_items %}
+          <tr>
+            <td class="change-{{ item.change_type }}">{{ item.change_type }}</td>
+            <td><code>{{ item.post_id or "-" }}</code></td>
+            <td><a href="{{ item.post_url }}" target="_blank">{{ item.post_url }}</a></td>
+          </tr>
+          {% else %}
+          <tr><td colspan="3">无 diff 项</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>本次帖子样本（最多 100 条）</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>post_id</th>
+            <th>title</th>
+            <th>likes</th>
+            <th>publish_time</th>
+            <th>post_url</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for post in post_samples %}
+          <tr>
+            <td><code>{{ post.post_id }}</code></td>
+            <td>{{ post.title or "-" }}</td>
+            <td>{{ post.like_count if post.like_count is not none else "-" }}</td>
+            <td>{{ post.publish_time or "-" }}</td>
+            <td><a href="{{ post.post_url }}" target="_blank">{{ post.post_url }}</a></td>
+          </tr>
+          {% else %}
+          <tr><td colspan="5">无帖子样本</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </body>
+</html>

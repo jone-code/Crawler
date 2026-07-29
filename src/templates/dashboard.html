@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Crawler Admin</title>
+    <style>
+      body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 24px; background: #f5f7fb; color: #1f2937; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; margin-bottom: 16px; }
+      .card { background: white; border-radius: 10px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+      h1 { margin-top: 0; }
+      h2 { margin: 0 0 12px; font-size: 18px; }
+      label { display: block; margin: 8px 0 4px; font-size: 13px; color: #374151; }
+      input, select, textarea { width: 100%; padding: 8px; border: 1px solid #d1d5db; border-radius: 8px; box-sizing: border-box; }
+      textarea { min-height: 84px; resize: vertical; }
+      button { margin-top: 10px; background: #2563eb; border: none; color: white; padding: 8px 14px; border-radius: 8px; cursor: pointer; }
+      button.secondary { background: #6b7280; }
+      table { width: 100%; border-collapse: collapse; background: white; border-radius: 10px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+      th, td { padding: 10px; border-bottom: 1px solid #e5e7eb; text-align: left; vertical-align: top; font-size: 13px; }
+      th { background: #f9fafb; font-weight: 600; }
+      .flash { padding: 10px 12px; border-radius: 8px; margin-bottom: 10px; }
+      .flash.success { background: #dcfce7; color: #166534; }
+      .flash.error { background: #fee2e2; color: #991b1b; }
+      .muted { color: #6b7280; font-size: 12px; }
+      .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; }
+      .pill.enabled { background: #dcfce7; color: #166534; }
+      .pill.disabled { background: #f3f4f6; color: #374151; }
+      .inline-form { display: inline; }
+      code { background: #eef2ff; padding: 2px 6px; border-radius: 6px; }
+      a { color: #1d4ed8; text-decoration: none; }
+      .small { font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <h1>Crawler Admin</h1>
+    <p class="muted">数据库: <code>{{ default_db_path }}</code></p>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, message in messages %}
+          <div class="flash {{ category }}">{{ message }}</div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+
+    <div class="grid">
+      <div class="card">
+        <h2>添加/更新博主</h2>
+        <form method="post" action="/creators">
+          <label>平台</label>
+          <select name="platform" required>
+            <option value="xiaohongshu">xiaohongshu</option>
+            <option value="douyin">douyin</option>
+          </select>
+          <label>博主 ID</label>
+          <input name="creator_id" placeholder="例如: 61b219830000000021024786" required />
+          <label>metadata JSON（可选）</label>
+          <textarea name="metadata_json" placeholder='{"source":"admin"}'></textarea>
+          <label><input type="checkbox" name="enabled" checked style="width:auto;" /> 启用</label>
+          <button type="submit">保存博主</button>
+        </form>
+      </div>
+
+      <div class="card">
+        <h2>触发抓取</h2>
+        <form method="post" action="/crawl">
+          <label>平台</label>
+          <select name="platform" required>
+            <option value="xiaohongshu">xiaohongshu</option>
+            <option value="douyin">douyin</option>
+          </select>
+          <label>博主 ID</label>
+          <input name="creator_id" placeholder="creator_id" required />
+          <label>max_items（0=持续下探）</label>
+          <input type="number" name="max_items" value="20" min="0" />
+          <label>cookies_path（可选）</label>
+          <input name="cookies_path" placeholder="cookies/xiaohongshu.cookies.json" />
+          <label><input type="checkbox" name="use_account_pool" style="width:auto;" /> 使用账号池自动轮询（忽略上面的 cookies_path）</label>
+          <label><input type="checkbox" name="use_proxy_pool" style="width:auto;" /> 使用代理池自动轮询（按优先级轮换）</label>
+          <label>media_root</label>
+          <input name="media_root" value="data/media" />
+          <label><input type="checkbox" name="download_media" style="width:auto;" /> 下载图片/视频</label>
+          <button type="submit">开始抓取</button>
+        </form>
+      </div>
+
+      <div class="card">
+        <h2>添加/更新抓取账号</h2>
+        <form method="post" action="/accounts">
+          <label>平台</label>
+          <select name="platform" required>
+            <option value="xiaohongshu">xiaohongshu</option>
+            <option value="douyin">douyin</option>
+          </select>
+          <label>账号名（自定义）</label>
+          <input name="account_name" placeholder="例如: xhs_main_01" required />
+          <label>cookies_path</label>
+          <input name="cookies_path" placeholder="cookies/xhs_account_01.json" required />
+          <label>priority（越小优先级越高）</label>
+          <input type="number" name="priority" value="100" />
+          <label>metadata JSON（可选）</label>
+          <textarea name="metadata_json" placeholder='{"owner":"team-a"}'></textarea>
+          <label><input type="checkbox" name="enabled" checked style="width:auto;" /> 启用</label>
+          <button type="submit">保存账号</button>
+        </form>
+      </div>
+
+      <div class="card">
+        <h2>添加/更新代理IP</h2>
+        <form method="post" action="/proxies">
+          <label>平台</label>
+          <select name="platform" required>
+            <option value="xiaohongshu">xiaohongshu</option>
+            <option value="douyin">douyin</option>
+          </select>
+          <label>代理名（自定义）</label>
+          <input name="proxy_name" placeholder="例如: xhs_proxy_01" required />
+          <label>proxy_url</label>
+          <input name="proxy_url" placeholder="http://user:pass@127.0.0.1:7890" required />
+          <label>priority（越小优先级越高）</label>
+          <input type="number" name="priority" value="100" />
+          <label>metadata JSON（可选）</label>
+          <textarea name="metadata_json" placeholder='{"provider":"residential-a"}'></textarea>
+          <label><input type="checkbox" name="enabled" checked style="width:auto;" /> 启用</label>
+          <button type="submit">保存代理</button>
+        </form>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <h2>博主列表</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>平台</th>
+            <th>ID</th>
+            <th>主页</th>
+            <th>状态</th>
+            <th>最近抓取</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for creator in creators %}
+          <tr>
+            <td>{{ creator.platform }}</td>
+            <td><code>{{ creator.creator_id }}</code></td>
+            <td><a href="{{ creator.creator_url }}" target="_blank">{{ creator.creator_url }}</a></td>
+            <td>
+              {% if creator.enabled %}
+                <span class="pill enabled">enabled</span>
+              {% else %}
+                <span class="pill disabled">disabled</span>
+              {% endif %}
+            </td>
+            <td>{{ creator.last_crawl_time_utc or "-" }}</td>
+            <td>
+              <form class="inline-form" method="post" action="/creators/toggle">
+                <input type="hidden" name="platform" value="{{ creator.platform }}" />
+                <input type="hidden" name="creator_id" value="{{ creator.creator_id }}" />
+                <input type="hidden" name="enabled" value="{{ 0 if creator.enabled else 1 }}" />
+                <button class="secondary" type="submit">{{ "停用" if creator.enabled else "启用" }}</button>
+              </form>
+            </td>
+          </tr>
+          {% else %}
+          <tr><td colspan="6">暂无博主</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <h2>账号池</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>平台</th>
+            <th>账号名</th>
+            <th>cookies_path</th>
+            <th>状态</th>
+            <th>优先级</th>
+            <th>成功/失败</th>
+            <th>最近健康度</th>
+            <th>最近使用</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for account in accounts %}
+          <tr>
+            <td>{{ account.id }}</td>
+            <td>{{ account.platform }}</td>
+            <td><code>{{ account.account_name }}</code></td>
+            <td class="small">{{ account.cookies_path }}</td>
+            <td>
+              {% if account.enabled %}
+                <span class="pill enabled">enabled</span>
+              {% else %}
+                <span class="pill disabled">disabled</span>
+              {% endif %}
+            </td>
+            <td>{{ account.priority }}</td>
+            <td>{{ account.success_count }} / {{ account.fail_count }}</td>
+            <td>{{ account.last_health or "-" }}</td>
+            <td>{{ account.last_used_at_utc or "-" }}</td>
+            <td>
+              <form class="inline-form" method="post" action="/accounts/toggle">
+                <input type="hidden" name="account_id" value="{{ account.id }}" />
+                <input type="hidden" name="enabled" value="{{ 0 if account.enabled else 1 }}" />
+                <button class="secondary" type="submit">{{ "停用" if account.enabled else "启用" }}</button>
+              </form>
+            </td>
+          </tr>
+          {% else %}
+          <tr><td colspan="10">暂无账号</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <h2>代理池</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>平台</th>
+            <th>代理名</th>
+            <th>proxy_url</th>
+            <th>状态</th>
+            <th>优先级</th>
+            <th>成功/失败</th>
+            <th>最近健康度</th>
+            <th>最近延迟(ms)</th>
+            <th>最近使用</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for proxy in proxies %}
+          <tr>
+            <td>{{ proxy.id }}</td>
+            <td>{{ proxy.platform }}</td>
+            <td><code>{{ proxy.proxy_name }}</code></td>
+            <td class="small">{{ proxy.proxy_url }}</td>
+            <td>
+              {% if proxy.enabled %}
+                <span class="pill enabled">enabled</span>
+              {% else %}
+                <span class="pill disabled">disabled</span>
+              {% endif %}
+            </td>
+            <td>{{ proxy.priority }}</td>
+            <td>{{ proxy.success_count }} / {{ proxy.fail_count }}</td>
+            <td>{{ proxy.last_health or "-" }}</td>
+            <td>{{ proxy.last_latency_ms or "-" }}</td>
+            <td>{{ proxy.last_used_at_utc or "-" }}</td>
+            <td>
+              <form class="inline-form" method="post" action="/proxies/toggle">
+                <input type="hidden" name="proxy_id" value="{{ proxy.id }}" />
+                <input type="hidden" name="enabled" value="{{ 0 if proxy.enabled else 1 }}" />
+                <button class="secondary" type="submit">{{ "停用" if proxy.enabled else "启用" }}</button>
+              </form>
+            </td>
+          </tr>
+          {% else %}
+          <tr><td colspan="11">暂无代理</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>最近抓取记录</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>run_id</th>
+            <th>平台/博主</th>
+            <th>帖子数</th>
+            <th>diff</th>
+            <th>媒体数</th>
+            <th>抓取时间</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for run in recent_runs %}
+          <tr>
+            <td><a href="/runs/{{ run.id }}">{{ run.id }}</a></td>
+            <td>
+              <div><strong>{{ run.platform }}</strong></div>
+              <div class="muted">{{ run.creator_name or "-" }}</div>
+            </td>
+            <td>{{ run.post_count }}</td>
+            <td>
+              new={{ run.new_count }} /
+              upd={{ run.updated_count }} /
+              miss={{ run.missing_count }}
+            </td>
+            <td>{{ run.media_count }}</td>
+            <td>{{ run.crawl_time_utc }}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="6">暂无抓取记录</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </body>
+</html>
