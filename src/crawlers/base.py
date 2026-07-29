@@ -163,17 +163,48 @@ class BaseCrawler(ABC):
                 return
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
+                error_kind = self._classify_retry_error(exc)
+                backoff_ms = self._compute_retry_backoff_ms(error_kind, attempt)
                 self.crawler_meta["retry"]["errors"].append(
-                    f"open_creator_page attempt={attempt} error={exc}"
+                    f"open_creator_page attempt={attempt} kind={error_kind} backoff_ms={backoff_ms} error={exc}"
                 )
                 if attempt >= self.max_retry_attempts:
                     break
-                await page.wait_for_timeout(int(self.retry_backoff_seconds * 1000 * attempt))
+                try:
+                    await page.goto("about:blank", wait_until="domcontentloaded", timeout=5000)
+                except Exception:  # noqa: BLE001
+                    pass
+                await page.wait_for_timeout(backoff_ms)
         if last_exc:
             raise last_exc
 
     async def _sleep_with_jitter(self) -> None:
         await asyncio.sleep(random.randint(self.min_delay_ms, self.max_delay_ms) / 1000)
+
+    def _classify_retry_error(self, exc: Exception) -> str:
+        text = str(exc).lower()
+        if any(token in text for token in ["timeout", "timed out", "err_timed_out"]):
+            return "network_timeout"
+        if any(token in text for token in ["proxy", "tunnel", "err_proxy"]):
+            return "proxy_error"
+        if any(token in text for token in ["429", "too many requests", "rate limit"]):
+            return "rate_limited"
+        if any(token in text for token in ["captcha", "forbidden", "denied", "access"]):
+            return "access_limited"
+        return "unknown_error"
+
+    def _compute_retry_backoff_ms(self, error_kind: str, attempt: int) -> int:
+        base_ms = int(self.retry_backoff_seconds * 1000)
+        if error_kind == "network_timeout":
+            multiplier = 1.4
+        elif error_kind == "proxy_error":
+            multiplier = 1.8
+        elif error_kind in {"rate_limited", "access_limited"}:
+            multiplier = 2.5
+        else:
+            multiplier = 1.0
+        jitter_ms = random.randint(120, 900)
+        return int(base_ms * max(1.0, attempt * multiplier) + jitter_ms)
 
     @abstractmethod
     async def _crawl_page(

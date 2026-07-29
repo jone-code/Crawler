@@ -15,6 +15,9 @@ from .service import (
     list_crawl_account_pool,
     list_crawl_proxy_pool,
     list_creator_ids,
+    list_pool_health_history,
+    list_pool_health_trend,
+    probe_pool_health_sync,
     toggle_crawl_account,
     toggle_crawl_proxy,
 )
@@ -32,15 +35,53 @@ def create_app(db_path: str | None = None) -> Flask:
 
     @app.get("/")
     def dashboard():
+        health_platform_raw = (request.args.get("health_platform") or "").strip().lower()
+        health_platform = health_platform_raw if health_platform_raw in {"xiaohongshu", "douyin"} else None
+        health_resource_type_raw = (request.args.get("health_resource_type") or "").strip().lower()
+        health_resource_type = (
+            health_resource_type_raw
+            if health_resource_type_raw in {"account", "proxy"}
+            else None
+        )
+        window_raw = (request.args.get("health_window_hours") or "24").strip()
+        try:
+            parsed_window = int(window_raw)
+        except ValueError:
+            parsed_window = 24
+        health_window_hours = parsed_window if parsed_window in {24, 72, 168} else 24
+        only_abnormal = (request.args.get("only_abnormal") or "").strip() == "1"
+
         creators = list_creator_ids(db_path=app.config["DB_PATH"], enabled_only=False)
         accounts = list_crawl_account_pool(db_path=app.config["DB_PATH"], enabled_only=False)
         proxies = list_crawl_proxy_pool(db_path=app.config["DB_PATH"], enabled_only=False)
+        pool_health_history = list_pool_health_history(
+            db_path=app.config["DB_PATH"],
+            platform=health_platform,  # type: ignore[arg-type]
+            resource_type=health_resource_type,
+            window_hours=health_window_hours,
+            only_failed=only_abnormal,
+            limit=100,
+        )
+        pool_health_trend = list_pool_health_trend(
+            db_path=app.config["DB_PATH"],
+            platform=health_platform,  # type: ignore[arg-type]
+            resource_type=health_resource_type,
+            window_hours=health_window_hours,
+            only_anomalies=only_abnormal,
+            limit=100,
+        )
         recent_runs = _list_recent_runs(app.config["DB_PATH"], limit=50)
         return render_template(
             "dashboard.html",
             creators=creators,
             accounts=accounts,
             proxies=proxies,
+            pool_health_history=pool_health_history,
+            pool_health_trend=pool_health_trend,
+            health_filter_platform=health_platform_raw or "all",
+            health_filter_resource_type=health_resource_type_raw or "all",
+            health_filter_window_hours=health_window_hours,
+            health_filter_only_abnormal=only_abnormal,
             recent_runs=recent_runs,
             default_db_path=app.config["DB_PATH"],
         )
@@ -276,10 +317,60 @@ def create_app(db_path: str | None = None) -> Flask:
                     f"代理池命中: {proxy_meta.get('proxy_name')} ({proxy_meta.get('health')})",
                     "success",
                 )
+            scheduler_meta = result.get("crawl", {}).get("crawler_meta", {}).get("scheduler", {})
+            if isinstance(scheduler_meta, dict):
+                attempts_total = scheduler_meta.get("attempts_total")
+                if isinstance(attempts_total, int):
+                    flash(f"调度尝试次数: {attempts_total}", "success")
             return redirect(url_for("run_detail", run_id=run_id))
         except Exception as exc:  # noqa: BLE001
             flash(f"抓取失败: {exc}", "error")
             return redirect(url_for("dashboard"))
+
+    @app.post("/pool-health-check")
+    def pool_health_check():
+        platform = (request.form.get("platform") or "").strip()
+        probe_accounts = request.form.get("probe_accounts") == "on"
+        probe_proxies = request.form.get("probe_proxies") == "on"
+        headless = request.form.get("headless") == "on"
+        try:
+            timeout_ms = int((request.form.get("timeout_ms") or "12000").strip())
+        except ValueError:
+            timeout_ms = 12000
+        timeout_ms = max(3000, min(timeout_ms, 60000))
+
+        try:
+            summary = probe_pool_health_sync(
+                platform=platform,  # type: ignore[arg-type]
+                db_path=app.config["DB_PATH"],
+                probe_accounts=probe_accounts,
+                probe_proxies=probe_proxies,
+                timeout_ms=timeout_ms,
+                headless=headless,
+            )
+            flash(
+                (
+                    f"健康检查完成: accounts={summary.get('account_ok_count', 0)}/"
+                    f"{summary.get('account_probe_count', 0)} | proxies={summary.get('proxy_ok_count', 0)}/"
+                    f"{summary.get('proxy_probe_count', 0)}"
+                ),
+                "success",
+            )
+            for item in summary.get("accounts", []):
+                if isinstance(item, dict) and not item.get("success"):
+                    flash(
+                        f"账号异常: {item.get('account_name')} | {item.get('failure_kind')} | {item.get('error')}",
+                        "error",
+                    )
+            for item in summary.get("proxies", []):
+                if isinstance(item, dict) and not item.get("success"):
+                    flash(
+                        f"代理异常: {item.get('proxy_name')} | {item.get('failure_kind')} | {item.get('error')}",
+                        "error",
+                    )
+        except Exception as exc:  # noqa: BLE001
+            flash(f"健康检查失败: {exc}", "error")
+        return redirect(url_for("dashboard"))
 
     @app.get("/runs/<int:run_id>")
     def run_detail(run_id: int):

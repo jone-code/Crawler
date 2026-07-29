@@ -16,6 +16,9 @@ This project crawls creator post lists from:
 - Optional media downloading (images/videos)
 - Built-in admin web page (creator management + crawl runs + diff view)
 - Account pool + proxy pool rotation for anti-bot resilience
+- P0 resilience scheduler: cooldown circuit-breaker + weighted scoring
+- Active pool health check API/admin action for account/proxy probing
+- Health-check history and 24h trend view in admin dashboard
 - Procurement reference for proxy vendors and acceptance checklist (`proxy_pool_procurement.md`)
 
 ## Environment
@@ -46,6 +49,7 @@ Then open `http://127.0.0.1:8000` to:
 - add/enable/disable creators
 - manage crawl account pool (multi-account rotation)
 - manage crawl proxy pool (multi-proxy rotation)
+- run one-click pool health checks (accounts/proxies)
 - trigger crawl jobs
 - inspect per-run diff summary (`new/updated/missing`)
 - inspect media download status
@@ -184,6 +188,21 @@ add_crawl_proxy(
 print(list_crawl_proxy_pool(db_path=DB_PATH, platform="xiaohongshu", enabled_only=True))
 ```
 
+### Run Pool Health Check (P0)
+
+```python
+from src import probe_pool_health_sync
+
+summary = probe_pool_health_sync(
+    platform="xiaohongshu",
+    db_path="data/crawler.db",
+    probe_accounts=True,
+    probe_proxies=True,
+    timeout_ms=12000,
+)
+print(summary)
+```
+
 ### Save Existing Payload to SQLite
 
 ```python
@@ -242,6 +261,11 @@ save_creator_content(payload, db_path="data/crawler.db")
 - Multi-account pool is supported via `crawl_accounts`; when `use_account_pool=True`, accounts are tried in priority order and auto-switched on failure.
 - IP proxy pool is supported via `crawl_proxies`; when `use_proxy_pool=True`, proxies are tried in priority order and auto-switched on failure.
 - `use_account_pool=True` and `use_proxy_pool=True` can be enabled together to run account + proxy joint rotation.
+- Runtime scheduler now applies cooldown circuit-breaker and weighted score selection based on priority, success/failure history, fail streak, and latency.
+- Retry backoff is now classified by error type (timeout/proxy/rate-limit/access-limit) with differentiated wait intervals.
+- `probe_pool_health_sync` provides active runtime probes and writes health/cooldown updates back to pool records.
+- Health probe events are persisted in `pool_health_events` and surfaced as 24h trend + recent event tables in admin.
+- Admin health views support platform/type filter, anomaly-only filter, and window switch (24h/72h/7d).
 - Diff data for each run is persisted in `crawl_diffs` and `crawl_diff_items`, and also returned in `result["storage"]["diff"]` (`new/updated/unchanged/missing`).
 - For stable production crawling, combine browser automation with request-level API parsing and retry strategy.
 
