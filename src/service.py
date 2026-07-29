@@ -11,9 +11,12 @@ from playwright.async_api import async_playwright
 from .crawlers import DouyinCrawler, XiaohongshuCrawler
 from .media_downloader import download_post_media
 from .storage import (
+    add_pool_health_event,
     get_crawl_checkpoint,
     list_crawl_accounts,
     list_crawl_proxies,
+    list_pool_health_events,
+    list_pool_health_trends,
     mark_crawl_account_result,
     mark_crawl_proxy_result,
     list_creators,
@@ -767,6 +770,36 @@ def toggle_crawl_proxy(
     set_crawl_proxy_enabled(proxy_id=proxy_id, enabled=enabled, db_path=db_path)
 
 
+def list_pool_health_history(
+    *,
+    db_path: str = "data/crawler.db",
+    platform: Platform | None = None,
+    resource_type: str | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    return list_pool_health_events(
+        db_path=db_path,
+        platform=platform,
+        resource_type=resource_type,
+        limit=limit,
+    )
+
+
+def list_pool_health_trend(
+    *,
+    db_path: str = "data/crawler.db",
+    platform: Platform | None = None,
+    window_hours: int = 24,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    return list_pool_health_trends(
+        db_path=db_path,
+        platform=platform,
+        window_hours=window_hours,
+        limit=limit,
+    )
+
+
 async def probe_pool_health(
     *,
     platform: Platform,
@@ -808,6 +841,20 @@ async def probe_pool_health(
                 **result,
             }
             summary["accounts"].append(account_row)
+            add_pool_health_event(
+                platform=platform,
+                resource_type="account",
+                resource_id=account["id"],
+                resource_name=account["account_name"],
+                success=result["success"],
+                health=result["health"],
+                failure_kind=result["failure_kind"],
+                latency_ms=result["latency_ms"],
+                status_code=result.get("status_code"),
+                probe_url=result.get("probe_url"),
+                error=result.get("error"),
+                db_path=db_path,
+            )
             account_cd, _ = _cooldown_for_failure_kind(result["failure_kind"])
             mark_crawl_account_result(
                 account_id=account["id"],
@@ -841,6 +888,20 @@ async def probe_pool_health(
                 **result,
             }
             summary["proxies"].append(proxy_row)
+            add_pool_health_event(
+                platform=platform,
+                resource_type="proxy",
+                resource_id=proxy["id"],
+                resource_name=proxy["proxy_name"],
+                success=result["success"],
+                health=result["health"],
+                failure_kind=result["failure_kind"],
+                latency_ms=result["latency_ms"],
+                status_code=result.get("status_code"),
+                probe_url=result.get("probe_url"),
+                error=result.get("error"),
+                db_path=db_path,
+            )
             _, proxy_cd = _cooldown_for_failure_kind(result["failure_kind"])
             mark_crawl_proxy_result(
                 proxy_id=proxy["id"],

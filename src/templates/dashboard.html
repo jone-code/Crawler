@@ -297,6 +297,80 @@
       </table>
     </div>
 
+    <div class="card" style="margin-bottom:16px;">
+      <h2>池子健康趋势（24h）</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>平台</th>
+            <th>类型</th>
+            <th>资源</th>
+            <th>检查次数</th>
+            <th>成功率</th>
+            <th>平均延迟(ms)</th>
+            <th>最近健康度</th>
+            <th>最近失败类型</th>
+            <th>最近检查</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in pool_health_trend %}
+          <tr>
+            <td>{{ item.platform }}</td>
+            <td>{{ item.resource_type }}</td>
+            <td><code>{{ item.resource_name }}</code></td>
+            <td>{{ item.total_checks }}</td>
+            <td>{{ item.success_rate_pct }}%</td>
+            <td>{{ item.avg_latency_ms or "-" }}</td>
+            <td>{{ item.last_health or "-" }}</td>
+            <td>{{ item.last_failure_kind or "-" }}</td>
+            <td>{{ item.last_checked_at_utc or "-" }}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="9">暂无趋势数据</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <h2>最近健康检查明细</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>时间</th>
+            <th>平台</th>
+            <th>类型</th>
+            <th>资源</th>
+            <th>结果</th>
+            <th>健康度</th>
+            <th>失败类型</th>
+            <th>HTTP状态</th>
+            <th>延迟(ms)</th>
+            <th>错误</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in pool_health_history %}
+          <tr>
+            <td>{{ item.checked_at_utc }}</td>
+            <td>{{ item.platform }}</td>
+            <td>{{ item.resource_type }}</td>
+            <td><code>{{ item.resource_name }}</code></td>
+            <td>{{ "ok" if item.success else "fail" }}</td>
+            <td>{{ item.health or "-" }}</td>
+            <td>{{ item.failure_kind or "-" }}</td>
+            <td>{{ item.status_code or "-" }}</td>
+            <td>{{ item.latency_ms or "-" }}</td>
+            <td class="small">{{ item.error or "-" }}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="10">暂无检查明细</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
     <div class="card">
       <h2>最近抓取记录</h2>
       <table>

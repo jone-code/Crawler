@@ -18,6 +18,7 @@ This project crawls creator post lists from:
 - Account pool + proxy pool rotation for anti-bot resilience
 - P0 resilience scheduler: cooldown circuit-breaker + weighted scoring
 - Active pool health check API/admin action for account/proxy probing
+- Health-check history and 24h trend view in admin dashboard
 - Procurement reference for proxy vendors and acceptance checklist (`proxy_pool_procurement.md`)
 
 ## Environment
@@ -263,6 +264,7 @@ save_creator_content(payload, db_path="data/crawler.db")
 - Runtime scheduler now applies cooldown circuit-breaker and weighted score selection based on priority, success/failure history, fail streak, and latency.
 - Retry backoff is now classified by error type (timeout/proxy/rate-limit/access-limit) with differentiated wait intervals.
 - `probe_pool_health_sync` provides active runtime probes and writes health/cooldown updates back to pool records.
+- Health probe events are persisted in `pool_health_events` and surfaced as 24h trend + recent event tables in admin.
 - Diff data for each run is persisted in `crawl_diffs` and `crawl_diff_items`, and also returned in `result["storage"]["diff"]` (`new/updated/unchanged/missing`).
 - For stable production crawling, combine browser automation with request-level API parsing and retry strategy.
 

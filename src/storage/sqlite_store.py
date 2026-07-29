@@ -181,6 +181,25 @@ def init_sqlite_db(db_path: str = DEFAULT_DB_PATH) -> None:
 
             CREATE INDEX IF NOT EXISTS idx_crawl_diff_items_run_change
               ON crawl_diff_items(run_id, change_type);
+
+            CREATE TABLE IF NOT EXISTS pool_health_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform TEXT NOT NULL,
+                resource_type TEXT NOT NULL,
+                resource_id INTEGER,
+                resource_name TEXT NOT NULL,
+                success INTEGER NOT NULL,
+                health TEXT,
+                failure_kind TEXT,
+                latency_ms INTEGER,
+                status_code INTEGER,
+                probe_url TEXT,
+                error TEXT,
+                checked_at_utc TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_pool_health_events_lookup
+              ON pool_health_events(platform, resource_type, resource_id, checked_at_utc);
             """
         )
         _run_schema_migrations(conn)
@@ -881,6 +900,203 @@ def mark_crawl_proxy_result(
             ),
         )
         conn.commit()
+
+
+def add_pool_health_event(
+    *,
+    platform: str,
+    resource_type: str,
+    resource_id: int | None,
+    resource_name: str,
+    success: bool,
+    health: str | None = None,
+    failure_kind: str | None = None,
+    latency_ms: int | None = None,
+    status_code: int | None = None,
+    probe_url: str | None = None,
+    error: str | None = None,
+    db_path: str = DEFAULT_DB_PATH,
+) -> None:
+    if resource_type not in {"account", "proxy"}:
+        raise ValueError("resource_type must be 'account' or 'proxy'")
+    if not resource_name.strip():
+        raise ValueError("resource_name cannot be empty")
+    init_sqlite_db(db_path=db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO pool_health_events (
+                platform,
+                resource_type,
+                resource_id,
+                resource_name,
+                success,
+                health,
+                failure_kind,
+                latency_ms,
+                status_code,
+                probe_url,
+                error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                platform,
+                resource_type,
+                resource_id,
+                resource_name.strip(),
+                1 if success else 0,
+                health,
+                failure_kind,
+                latency_ms,
+                status_code,
+                probe_url,
+                error,
+            ),
+        )
+        conn.commit()
+
+
+def list_pool_health_events(
+    *,
+    db_path: str = DEFAULT_DB_PATH,
+    platform: str | None = None,
+    resource_type: str | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    init_sqlite_db(db_path=db_path)
+    query = """
+        SELECT
+            id,
+            platform,
+            resource_type,
+            resource_id,
+            resource_name,
+            success,
+            health,
+            failure_kind,
+            latency_ms,
+            status_code,
+            probe_url,
+            error,
+            checked_at_utc
+        FROM pool_health_events
+    """
+    filters: list[str] = []
+    params: list[Any] = []
+    if platform:
+        filters.append("platform = ?")
+        params.append(platform)
+    if resource_type:
+        filters.append("resource_type = ?")
+        params.append(resource_type)
+    if filters:
+        query += " WHERE " + " AND ".join(filters)
+    query += " ORDER BY id DESC LIMIT ?"
+    params.append(max(1, limit))
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [
+        {
+            "id": row[0],
+            "platform": row[1],
+            "resource_type": row[2],
+            "resource_id": row[3],
+            "resource_name": row[4],
+            "success": bool(row[5]),
+            "health": row[6],
+            "failure_kind": row[7],
+            "latency_ms": row[8],
+            "status_code": row[9],
+            "probe_url": row[10],
+            "error": row[11],
+            "checked_at_utc": row[12],
+        }
+        for row in rows
+    ]
+
+
+def list_pool_health_trends(
+    *,
+    db_path: str = DEFAULT_DB_PATH,
+    platform: str | None = None,
+    window_hours: int = 24,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    init_sqlite_db(db_path=db_path)
+    effective_hours = max(1, min(window_hours, 24 * 30))
+    window_expr = f"-{effective_hours} hours"
+    query = """
+        SELECT
+            e.platform,
+            e.resource_type,
+            e.resource_id,
+            e.resource_name,
+            COUNT(*) AS total_checks,
+            SUM(CASE WHEN e.success = 1 THEN 1 ELSE 0 END) AS success_count,
+            ROUND(
+                100.0 * SUM(CASE WHEN e.success = 1 THEN 1 ELSE 0 END) / COUNT(*),
+                2
+            ) AS success_rate_pct,
+            ROUND(AVG(COALESCE(e.latency_ms, 0)), 1) AS avg_latency_ms,
+            MAX(e.checked_at_utc) AS last_checked_at_utc,
+            (
+                SELECT x.health
+                FROM pool_health_events x
+                WHERE x.platform = e.platform
+                  AND x.resource_type = e.resource_type
+                  AND x.resource_name = e.resource_name
+                ORDER BY x.id DESC
+                LIMIT 1
+            ) AS last_health,
+            (
+                SELECT x.failure_kind
+                FROM pool_health_events x
+                WHERE x.platform = e.platform
+                  AND x.resource_type = e.resource_type
+                  AND x.resource_name = e.resource_name
+                ORDER BY x.id DESC
+                LIMIT 1
+            ) AS last_failure_kind
+        FROM pool_health_events e
+        WHERE e.checked_at_utc >= datetime('now', ?)
+    """
+    params: list[Any] = [window_expr]
+    if platform:
+        query += " AND e.platform = ?"
+        params.append(platform)
+    query += """
+        GROUP BY
+            e.platform,
+            e.resource_type,
+            e.resource_id,
+            e.resource_name
+        ORDER BY
+            success_rate_pct ASC,
+            total_checks DESC,
+            last_checked_at_utc DESC
+        LIMIT ?
+    """
+    params.append(max(1, limit))
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [
+        {
+            "platform": row[0],
+            "resource_type": row[1],
+            "resource_id": row[2],
+            "resource_name": row[3],
+            "total_checks": row[4],
+            "success_count": row[5],
+            "success_rate_pct": row[6],
+            "avg_latency_ms": row[7],
+            "last_checked_at_utc": row[8],
+            "last_health": row[9],
+            "last_failure_kind": row[10],
+        }
+        for row in rows
+    ]
 
 
 def get_crawl_checkpoint(

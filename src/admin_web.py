@@ -15,6 +15,8 @@ from .service import (
     list_crawl_account_pool,
     list_crawl_proxy_pool,
     list_creator_ids,
+    list_pool_health_history,
+    list_pool_health_trend,
     probe_pool_health_sync,
     toggle_crawl_account,
     toggle_crawl_proxy,
@@ -36,12 +38,23 @@ def create_app(db_path: str | None = None) -> Flask:
         creators = list_creator_ids(db_path=app.config["DB_PATH"], enabled_only=False)
         accounts = list_crawl_account_pool(db_path=app.config["DB_PATH"], enabled_only=False)
         proxies = list_crawl_proxy_pool(db_path=app.config["DB_PATH"], enabled_only=False)
+        pool_health_history = list_pool_health_history(
+            db_path=app.config["DB_PATH"],
+            limit=100,
+        )
+        pool_health_trend = list_pool_health_trend(
+            db_path=app.config["DB_PATH"],
+            window_hours=24,
+            limit=100,
+        )
         recent_runs = _list_recent_runs(app.config["DB_PATH"], limit=50)
         return render_template(
             "dashboard.html",
             creators=creators,
             accounts=accounts,
             proxies=proxies,
+            pool_health_history=pool_health_history,
+            pool_health_trend=pool_health_trend,
             recent_runs=recent_runs,
             default_db_path=app.config["DB_PATH"],
         )
