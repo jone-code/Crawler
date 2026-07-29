@@ -1,6 +1,7 @@
 from .sqlite_store import (
     add_pool_health_event,
     get_crawl_checkpoint,
+    get_scheduler_state,
     init_sqlite_db,
     list_creators,
     list_crawl_accounts,
@@ -17,6 +18,7 @@ from .sqlite_store import (
     set_crawl_account_enabled,
     set_crawl_proxy_enabled,
     set_creator_enabled,
+    upsert_scheduler_state,
     upsert_crawl_checkpoint,
 )
 
@@ -28,6 +30,8 @@ __all__ = [
     "add_pool_health_event",
     "list_pool_health_events",
     "list_pool_health_trends",
+    "get_scheduler_state",
+    "upsert_scheduler_state",
     "register_crawl_account",
     "list_crawl_accounts",
     "set_crawl_account_enabled",

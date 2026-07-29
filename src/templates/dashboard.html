@@ -102,6 +102,33 @@
       </div>
 
       <div class="card">
+        <h2>定时调度（P1）</h2>
+        <p class="muted">
+          最近调度:
+          <code>{{ scheduler_runtime.last_scheduler_run_utc or "-" }}</code> |
+          最近抓取周期:
+          <code>{{ scheduler_runtime.last_crawl_cycle_utc or "-" }}</code> |
+          最近健康周期:
+          <code>{{ scheduler_runtime.last_health_check_cycle_utc or "-" }}</code>
+        </p>
+        <form method="post" action="/scheduler/run-once">
+          <label>抓取间隔（分钟）</label>
+          <input type="number" name="crawl_interval_minutes" value="180" min="1" />
+          <label>健康检查间隔（分钟）</label>
+          <input type="number" name="health_interval_minutes" value="60" min="1" />
+          <label>每轮最多抓取博主数（0=不限）</label>
+          <input type="number" name="max_creators_per_cycle" value="0" min="0" />
+          <label>小红书并发上限</label>
+          <input type="number" name="xhs_concurrency" value="2" min="1" />
+          <label>抖音并发上限</label>
+          <input type="number" name="dy_concurrency" value="2" min="1" />
+          <label><input type="checkbox" name="force_crawl" style="width:auto;" /> 强制执行抓取周期</label>
+          <label><input type="checkbox" name="force_health_check" style="width:auto;" /> 强制执行健康检查周期</label>
+          <button type="submit">执行一轮调度</button>
+        </form>
+      </div>
+
+      <div class="card">
         <h2>添加/更新抓取账号</h2>
         <form method="post" action="/accounts">
           <label>平台</label>

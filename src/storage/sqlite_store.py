@@ -200,6 +200,12 @@ def init_sqlite_db(db_path: str = DEFAULT_DB_PATH) -> None:
 
             CREATE INDEX IF NOT EXISTS idx_pool_health_events_lookup
               ON pool_health_events(platform, resource_type, resource_id, checked_at_utc);
+
+            CREATE TABLE IF NOT EXISTS scheduler_state (
+                state_key TEXT PRIMARY KEY,
+                value_json TEXT NOT NULL,
+                updated_at_utc TEXT NOT NULL DEFAULT (datetime('now'))
+            );
             """
         )
         _run_schema_migrations(conn)
@@ -1118,6 +1124,60 @@ def list_pool_health_trends(
         }
         for row in rows
     ]
+
+
+def get_scheduler_state(
+    *,
+    state_key: str,
+    db_path: str = DEFAULT_DB_PATH,
+) -> dict[str, Any] | None:
+    if not state_key.strip():
+        raise ValueError("state_key cannot be empty")
+    init_sqlite_db(db_path=db_path)
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT value_json, updated_at_utc
+            FROM scheduler_state
+            WHERE state_key = ?
+            """,
+            (state_key.strip(),),
+        ).fetchone()
+    if row is None:
+        return None
+    payload = _safe_json_loads(row[0])
+    if not isinstance(payload, dict):
+        payload = {}
+    payload["updated_at_utc"] = row[1]
+    return payload
+
+
+def upsert_scheduler_state(
+    *,
+    state_key: str,
+    value: dict[str, Any],
+    db_path: str = DEFAULT_DB_PATH,
+) -> None:
+    if not state_key.strip():
+        raise ValueError("state_key cannot be empty")
+    init_sqlite_db(db_path=db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO scheduler_state (
+                state_key,
+                value_json
+            ) VALUES (?, ?)
+            ON CONFLICT(state_key) DO UPDATE SET
+                value_json = excluded.value_json,
+                updated_at_utc = datetime('now')
+            """,
+            (
+                state_key.strip(),
+                json.dumps(value, ensure_ascii=False),
+            ),
+        )
+        conn.commit()
 
 
 def get_crawl_checkpoint(

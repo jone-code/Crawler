@@ -23,8 +23,17 @@ from .service import (
     toggle_crawl_proxy,
 )
 from .media_downloader import download_post_media
+from .scheduler import (
+    CrawlScheduler,
+    SchedulerConfig,
+    get_scheduler_runtime_state,
+    run_scheduler_daemon,
+    run_scheduler_daemon_sync,
+    run_scheduler_once_sync,
+)
 from .storage import (
     get_crawl_checkpoint,
+    get_scheduler_state,
     init_sqlite_db,
     list_pool_health_events,
     list_pool_health_trends,
@@ -42,6 +51,7 @@ from .storage import (
     set_crawl_account_enabled,
     set_crawl_proxy_enabled,
     set_creator_enabled,
+    upsert_scheduler_state,
     upsert_crawl_checkpoint,
 )
 
@@ -68,12 +78,20 @@ __all__ = [
     "toggle_crawl_proxy",
     "probe_pool_health",
     "probe_pool_health_sync",
+    "SchedulerConfig",
+    "CrawlScheduler",
+    "run_scheduler_once_sync",
+    "run_scheduler_daemon",
+    "run_scheduler_daemon_sync",
+    "get_scheduler_runtime_state",
     "download_post_media",
     "init_sqlite_db",
     "save_creator_content",
     "add_pool_health_event",
     "list_pool_health_events",
     "list_pool_health_trends",
+    "get_scheduler_state",
+    "upsert_scheduler_state",
     "register_creator",
     "list_creators",
     "register_crawl_account",

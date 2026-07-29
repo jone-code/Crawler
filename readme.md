@@ -19,6 +19,7 @@ This project crawls creator post lists from:
 - P0 resilience scheduler: cooldown circuit-breaker + weighted scoring
 - Active pool health check API/admin action for account/proxy probing
 - Health-check history and 24h trend view in admin dashboard
+- Scheduler cycle support with platform-level concurrency limits
 - Procurement reference for proxy vendors and acceptance checklist (`proxy_pool_procurement.md`)
 
 ## Environment
@@ -50,6 +51,7 @@ Then open `http://127.0.0.1:8000` to:
 - manage crawl account pool (multi-account rotation)
 - manage crawl proxy pool (multi-proxy rotation)
 - run one-click pool health checks (accounts/proxies)
+- run scheduler cycles (independent crawl/health intervals + per-platform concurrency)
 - trigger crawl jobs
 - inspect per-run diff summary (`new/updated/missing`)
 - inspect media download status
@@ -203,6 +205,24 @@ summary = probe_pool_health_sync(
 print(summary)
 ```
 
+### Run Scheduler Daemon (P1)
+
+```bash
+export CRAWLER_DB_PATH="data/crawler.db"
+export CRAWL_INTERVAL_MINUTES=180
+export HEALTH_INTERVAL_MINUTES=60
+export SCHEDULER_TICK_SECONDS=30
+python -m src.scheduler_daemon
+```
+
+Optional environment variables:
+
+- `SCHEDULER_MAX_TICKS` (default `0`, infinite loop)
+- `SCHEDULER_MAX_CREATORS_PER_CYCLE` (default `0`, no limit)
+- `CRAWL_MAX_ITEMS`
+- `CRAWL_USE_ACCOUNT_POOL` / `CRAWL_USE_PROXY_POOL`
+- `HEALTH_TIMEOUT_MS`
+
 ### Save Existing Payload to SQLite
 
 ```python
@@ -266,6 +286,7 @@ save_creator_content(payload, db_path="data/crawler.db")
 - `probe_pool_health_sync` provides active runtime probes and writes health/cooldown updates back to pool records.
 - Health probe events are persisted in `pool_health_events` and surfaced as 24h trend + recent event tables in admin.
 - Admin health views support platform/type filter, anomaly-only filter, and window switch (24h/72h/7d).
+- Scheduler runtime state is persisted in `scheduler_state` and displayed in the admin scheduler card.
 - Diff data for each run is persisted in `crawl_diffs` and `crawl_diff_items`, and also returned in `result["storage"]["diff"]` (`new/updated/unchanged/missing`).
 - For stable production crawling, combine browser automation with request-level API parsing and retry strategy.
 
