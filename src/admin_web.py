@@ -7,6 +7,11 @@ from typing import Any
 
 from flask import Flask, flash, redirect, render_template, request, url_for
 
+from .scheduler import (
+    SchedulerConfig,
+    get_scheduler_runtime_state,
+    run_scheduler_once_sync,
+)
 from .service import (
     add_crawl_account,
     add_crawl_proxy,
@@ -35,6 +40,7 @@ def create_app(db_path: str | None = None) -> Flask:
 
     @app.get("/")
     def dashboard():
+        scheduler_runtime = get_scheduler_runtime_state(db_path=app.config["DB_PATH"])
         health_platform_raw = (request.args.get("health_platform") or "").strip().lower()
         health_platform = health_platform_raw if health_platform_raw in {"xiaohongshu", "douyin"} else None
         health_resource_type_raw = (request.args.get("health_resource_type") or "").strip().lower()
@@ -78,6 +84,7 @@ def create_app(db_path: str | None = None) -> Flask:
             proxies=proxies,
             pool_health_history=pool_health_history,
             pool_health_trend=pool_health_trend,
+            scheduler_runtime=scheduler_runtime,
             health_filter_platform=health_platform_raw or "all",
             health_filter_resource_type=health_resource_type_raw or "all",
             health_filter_window_hours=health_window_hours,
@@ -370,6 +377,79 @@ def create_app(db_path: str | None = None) -> Flask:
                     )
         except Exception as exc:  # noqa: BLE001
             flash(f"健康检查失败: {exc}", "error")
+        return redirect(url_for("dashboard"))
+
+    @app.post("/scheduler/run-once")
+    def scheduler_run_once():
+        force_crawl = request.form.get("force_crawl") == "on"
+        force_health_check = request.form.get("force_health_check") == "on"
+        try:
+            crawl_interval_minutes = int((request.form.get("crawl_interval_minutes") or "180").strip())
+        except ValueError:
+            crawl_interval_minutes = 180
+        try:
+            health_interval_minutes = int(
+                (request.form.get("health_interval_minutes") or "60").strip()
+            )
+        except ValueError:
+            health_interval_minutes = 60
+        try:
+            max_creators_per_cycle = int(
+                (request.form.get("max_creators_per_cycle") or "0").strip()
+            )
+        except ValueError:
+            max_creators_per_cycle = 0
+        try:
+            xhs_concurrency = int((request.form.get("xhs_concurrency") or "2").strip())
+        except ValueError:
+            xhs_concurrency = 2
+        try:
+            dy_concurrency = int((request.form.get("dy_concurrency") or "2").strip())
+        except ValueError:
+            dy_concurrency = 2
+
+        config = SchedulerConfig(
+            db_path=app.config["DB_PATH"],
+            crawl_interval_minutes=max(1, crawl_interval_minutes),
+            health_check_interval_minutes=max(1, health_interval_minutes),
+            max_creators_per_cycle=max(0, max_creators_per_cycle),
+            platform_concurrency={
+                "xiaohongshu": max(1, xhs_concurrency),
+                "douyin": max(1, dy_concurrency),
+            },
+            use_account_pool=True,
+            use_proxy_pool=True,
+            use_checkpoint=True,
+        )
+        try:
+            result = run_scheduler_once_sync(
+                config,
+                force_crawl=force_crawl,
+                force_health_check=force_health_check,
+            )
+            crawl_result = result.get("crawl_result")
+            health_result = result.get("health_result")
+            if isinstance(crawl_result, dict):
+                flash(
+                    "调度抓取: total={total} success={succ} failed={fail}".format(
+                        total=crawl_result.get("total_creators", 0),
+                        succ=crawl_result.get("success_count", 0),
+                        fail=crawl_result.get("failed_count", 0),
+                    ),
+                    "success",
+                )
+            if isinstance(health_result, dict):
+                flash(
+                    "调度健康检查: success={succ} failed={fail}".format(
+                        succ=health_result.get("success_count", 0),
+                        fail=health_result.get("failed_count", 0),
+                    ),
+                    "success",
+                )
+            if not isinstance(crawl_result, dict) and not isinstance(health_result, dict):
+                flash("调度周期已执行，但未达到到期条件（未触发任务）", "success")
+        except Exception as exc:  # noqa: BLE001
+            flash(f"调度执行失败: {exc}", "error")
         return redirect(url_for("dashboard"))
 
     @app.get("/runs/<int:run_id>")
