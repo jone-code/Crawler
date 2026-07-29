@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -41,9 +42,12 @@ def init_sqlite_db(db_path: str = DEFAULT_DB_PATH) -> None:
                 priority INTEGER NOT NULL DEFAULT 100,
                 fail_count INTEGER NOT NULL DEFAULT 0,
                 success_count INTEGER NOT NULL DEFAULT 0,
+                consecutive_failures INTEGER NOT NULL DEFAULT 0,
                 last_used_at_utc TEXT,
                 last_health TEXT,
                 last_error TEXT,
+                cooldown_until_utc TEXT,
+                last_latency_ms INTEGER,
                 metadata_json TEXT NOT NULL DEFAULT '{}',
                 created_at_utc TEXT NOT NULL DEFAULT (datetime('now')),
                 updated_at_utc TEXT NOT NULL DEFAULT (datetime('now')),
@@ -62,9 +66,11 @@ def init_sqlite_db(db_path: str = DEFAULT_DB_PATH) -> None:
                 priority INTEGER NOT NULL DEFAULT 100,
                 fail_count INTEGER NOT NULL DEFAULT 0,
                 success_count INTEGER NOT NULL DEFAULT 0,
+                consecutive_failures INTEGER NOT NULL DEFAULT 0,
                 last_used_at_utc TEXT,
                 last_health TEXT,
                 last_error TEXT,
+                cooldown_until_utc TEXT,
                 last_latency_ms INTEGER,
                 metadata_json TEXT NOT NULL DEFAULT '{}',
                 created_at_utc TEXT NOT NULL DEFAULT (datetime('now')),
@@ -177,6 +183,43 @@ def init_sqlite_db(db_path: str = DEFAULT_DB_PATH) -> None:
               ON crawl_diff_items(run_id, change_type);
             """
         )
+        _run_schema_migrations(conn)
+
+
+def _run_schema_migrations(conn: sqlite3.Connection) -> None:
+    _ensure_columns(
+        conn,
+        "crawl_accounts",
+        {
+            "consecutive_failures": "INTEGER NOT NULL DEFAULT 0",
+            "cooldown_until_utc": "TEXT",
+            "last_latency_ms": "INTEGER",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "crawl_proxies",
+        {
+            "consecutive_failures": "INTEGER NOT NULL DEFAULT 0",
+            "cooldown_until_utc": "TEXT",
+        },
+    )
+
+
+def _ensure_columns(
+    conn: sqlite3.Connection,
+    table_name: str,
+    columns: dict[str, str],
+) -> None:
+    existing = {
+        str(row[1])
+        for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        if len(row) > 1
+    }
+    for column_name, column_ddl in columns.items():
+        if column_name in existing:
+            continue
+        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_ddl}")
 
 
 def save_creator_content(payload: dict[str, Any], db_path: str = DEFAULT_DB_PATH) -> dict[str, Any]:
@@ -489,9 +532,12 @@ def register_crawl_account(
                 priority,
                 fail_count,
                 success_count,
+                consecutive_failures,
                 last_used_at_utc,
                 last_health,
                 last_error,
+                cooldown_until_utc,
+                last_latency_ms,
                 metadata_json,
                 created_at_utc,
                 updated_at_utc
@@ -523,9 +569,12 @@ def list_crawl_accounts(
             priority,
             fail_count,
             success_count,
+            consecutive_failures,
             last_used_at_utc,
             last_health,
             last_error,
+            cooldown_until_utc,
+            last_latency_ms,
             metadata_json,
             created_at_utc,
             updated_at_utc
@@ -574,27 +623,57 @@ def mark_crawl_account_result(
     success: bool,
     health: str | None = None,
     error: str | None = None,
+    failure_kind: str | None = None,
+    cooldown_seconds: int | None = None,
+    latency_ms: int | None = None,
     db_path: str = DEFAULT_DB_PATH,
 ) -> None:
     init_sqlite_db(db_path=db_path)
     with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT consecutive_failures FROM crawl_accounts WHERE id = ?",
+            (account_id,),
+        ).fetchone()
+        if row is None:
+            return
+        previous_failures = int(row[0] or 0)
+        if success:
+            next_failures = 0
+            cooldown_until_utc = None
+            last_error = None
+        else:
+            next_failures = previous_failures + 1
+            applied_cooldown = _resolve_cooldown_seconds(
+                failure_kind=failure_kind,
+                consecutive_failures=next_failures,
+                requested_seconds=cooldown_seconds,
+            )
+            cooldown_until_utc = _utc_after_seconds(applied_cooldown)
+            last_error = error
+
         conn.execute(
             """
             UPDATE crawl_accounts
             SET
                 success_count = success_count + ?,
                 fail_count = fail_count + ?,
+                consecutive_failures = ?,
                 last_used_at_utc = datetime('now'),
                 last_health = ?,
                 last_error = ?,
+                cooldown_until_utc = ?,
+                last_latency_ms = ?,
                 updated_at_utc = datetime('now')
             WHERE id = ?
             """,
             (
                 1 if success else 0,
                 0 if success else 1,
+                next_failures,
                 health,
-                error,
+                last_error,
+                cooldown_until_utc,
+                latency_ms,
                 account_id,
             ),
         )
@@ -656,9 +735,11 @@ def register_crawl_proxy(
                 priority,
                 fail_count,
                 success_count,
+                consecutive_failures,
                 last_used_at_utc,
                 last_health,
                 last_error,
+                cooldown_until_utc,
                 last_latency_ms,
                 metadata_json,
                 created_at_utc,
@@ -691,9 +772,11 @@ def list_crawl_proxies(
             priority,
             fail_count,
             success_count,
+            consecutive_failures,
             last_used_at_utc,
             last_health,
             last_error,
+            cooldown_until_utc,
             last_latency_ms,
             metadata_json,
             created_at_utc,
@@ -743,20 +826,45 @@ def mark_crawl_proxy_result(
     success: bool,
     health: str | None = None,
     error: str | None = None,
+    failure_kind: str | None = None,
+    cooldown_seconds: int | None = None,
     latency_ms: int | None = None,
     db_path: str = DEFAULT_DB_PATH,
 ) -> None:
     init_sqlite_db(db_path=db_path)
     with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT consecutive_failures FROM crawl_proxies WHERE id = ?",
+            (proxy_id,),
+        ).fetchone()
+        if row is None:
+            return
+        previous_failures = int(row[0] or 0)
+        if success:
+            next_failures = 0
+            cooldown_until_utc = None
+            last_error = None
+        else:
+            next_failures = previous_failures + 1
+            applied_cooldown = _resolve_cooldown_seconds(
+                failure_kind=failure_kind,
+                consecutive_failures=next_failures,
+                requested_seconds=cooldown_seconds,
+            )
+            cooldown_until_utc = _utc_after_seconds(applied_cooldown)
+            last_error = error
+
         conn.execute(
             """
             UPDATE crawl_proxies
             SET
                 success_count = success_count + ?,
                 fail_count = fail_count + ?,
+                consecutive_failures = ?,
                 last_used_at_utc = datetime('now'),
                 last_health = ?,
                 last_error = ?,
+                cooldown_until_utc = ?,
                 last_latency_ms = ?,
                 updated_at_utc = datetime('now')
             WHERE id = ?
@@ -764,8 +872,10 @@ def mark_crawl_proxy_result(
             (
                 1 if success else 0,
                 0 if success else 1,
+                next_failures,
                 health,
-                error,
+                last_error,
+                cooldown_until_utc,
                 latency_ms,
                 proxy_id,
             ),
@@ -832,6 +942,39 @@ def upsert_crawl_checkpoint(
         conn.commit()
 
 
+def _resolve_cooldown_seconds(
+    *,
+    failure_kind: str | None,
+    consecutive_failures: int,
+    requested_seconds: int | None,
+) -> int:
+    if requested_seconds is not None and requested_seconds > 0:
+        minimum = requested_seconds
+    else:
+        minimum = 0
+    failure_count = max(1, consecutive_failures)
+    kind = (failure_kind or "unknown").lower()
+    if kind == "auth_expired":
+        dynamic = 3600
+    elif kind == "proxy_error":
+        dynamic = min(1800, 120 * (2 ** min(failure_count - 1, 4)))
+    elif kind == "network_timeout":
+        dynamic = min(900, 60 * (2 ** min(failure_count - 1, 3)))
+    elif kind in {"rate_limited", "access_limited"}:
+        dynamic = min(3600, 300 * (2 ** min(failure_count - 1, 3)))
+    elif kind == "no_data":
+        dynamic = min(1200, 120 * failure_count)
+    else:
+        dynamic = min(1800, 90 * (2 ** min(failure_count - 1, 4)))
+    return max(minimum, dynamic)
+
+
+def _utc_after_seconds(seconds: int) -> str | None:
+    if seconds <= 0:
+        return None
+    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+
+
 def _creator_row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
     metadata_text = row[5] if isinstance(row[5], str) else "{}"
     try:
@@ -853,7 +996,7 @@ def _creator_row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
 
 
 def _crawl_account_row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
-    metadata_text = row[11] if isinstance(row[11], str) else "{}"
+    metadata_text = row[14] if isinstance(row[14], str) else "{}"
     try:
         metadata = json.loads(metadata_text)
     except json.JSONDecodeError:
@@ -867,17 +1010,20 @@ def _crawl_account_row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
         "priority": row[5],
         "fail_count": row[6],
         "success_count": row[7],
-        "last_used_at_utc": row[8],
-        "last_health": row[9],
-        "last_error": row[10],
+        "consecutive_failures": row[8],
+        "last_used_at_utc": row[9],
+        "last_health": row[10],
+        "last_error": row[11],
+        "cooldown_until_utc": row[12],
+        "last_latency_ms": row[13],
         "metadata": metadata,
-        "created_at_utc": row[12],
-        "updated_at_utc": row[13],
+        "created_at_utc": row[15],
+        "updated_at_utc": row[16],
     }
 
 
 def _crawl_proxy_row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
-    metadata_text = row[12] if isinstance(row[12], str) else "{}"
+    metadata_text = row[14] if isinstance(row[14], str) else "{}"
     try:
         metadata = json.loads(metadata_text)
     except json.JSONDecodeError:
@@ -891,13 +1037,15 @@ def _crawl_proxy_row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
         "priority": row[5],
         "fail_count": row[6],
         "success_count": row[7],
-        "last_used_at_utc": row[8],
-        "last_health": row[9],
-        "last_error": row[10],
-        "last_latency_ms": row[11],
+        "consecutive_failures": row[8],
+        "last_used_at_utc": row[9],
+        "last_health": row[10],
+        "last_error": row[11],
+        "cooldown_until_utc": row[12],
+        "last_latency_ms": row[13],
         "metadata": metadata,
-        "created_at_utc": row[13],
-        "updated_at_utc": row[14],
+        "created_at_utc": row[15],
+        "updated_at_utc": row[16],
     }
 
 

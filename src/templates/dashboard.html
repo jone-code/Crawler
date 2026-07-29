@@ -182,7 +182,9 @@
             <th>状态</th>
             <th>优先级</th>
             <th>成功/失败</th>
+            <th>连续失败</th>
             <th>最近健康度</th>
+            <th>冷却到期</th>
             <th>最近使用</th>
             <th>操作</th>
           </tr>
@@ -203,7 +205,9 @@
             </td>
             <td>{{ account.priority }}</td>
             <td>{{ account.success_count }} / {{ account.fail_count }}</td>
+            <td>{{ account.consecutive_failures or 0 }}</td>
             <td>{{ account.last_health or "-" }}</td>
+            <td>{{ account.cooldown_until_utc or "-" }}</td>
             <td>{{ account.last_used_at_utc or "-" }}</td>
             <td>
               <form class="inline-form" method="post" action="/accounts/toggle">
@@ -214,7 +218,7 @@
             </td>
           </tr>
           {% else %}
-          <tr><td colspan="10">暂无账号</td></tr>
+          <tr><td colspan="12">暂无账号</td></tr>
           {% endfor %}
         </tbody>
       </table>
@@ -232,7 +236,9 @@
             <th>状态</th>
             <th>优先级</th>
             <th>成功/失败</th>
+            <th>连续失败</th>
             <th>最近健康度</th>
+            <th>冷却到期</th>
             <th>最近延迟(ms)</th>
             <th>最近使用</th>
             <th>操作</th>
@@ -254,7 +260,9 @@
             </td>
             <td>{{ proxy.priority }}</td>
             <td>{{ proxy.success_count }} / {{ proxy.fail_count }}</td>
+            <td>{{ proxy.consecutive_failures or 0 }}</td>
             <td>{{ proxy.last_health or "-" }}</td>
+            <td>{{ proxy.cooldown_until_utc or "-" }}</td>
             <td>{{ proxy.last_latency_ms or "-" }}</td>
             <td>{{ proxy.last_used_at_utc or "-" }}</td>
             <td>
@@ -266,7 +274,7 @@
             </td>
           </tr>
           {% else %}
-          <tr><td colspan="11">暂无代理</td></tr>
+          <tr><td colspan="13">暂无代理</td></tr>
           {% endfor %}
         </tbody>
       </table>

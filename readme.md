@@ -16,6 +16,7 @@ This project crawls creator post lists from:
 - Optional media downloading (images/videos)
 - Built-in admin web page (creator management + crawl runs + diff view)
 - Account pool + proxy pool rotation for anti-bot resilience
+- P0 resilience scheduler: cooldown circuit-breaker + weighted scoring
 - Procurement reference for proxy vendors and acceptance checklist (`proxy_pool_procurement.md`)
 
 ## Environment
@@ -242,6 +243,8 @@ save_creator_content(payload, db_path="data/crawler.db")
 - Multi-account pool is supported via `crawl_accounts`; when `use_account_pool=True`, accounts are tried in priority order and auto-switched on failure.
 - IP proxy pool is supported via `crawl_proxies`; when `use_proxy_pool=True`, proxies are tried in priority order and auto-switched on failure.
 - `use_account_pool=True` and `use_proxy_pool=True` can be enabled together to run account + proxy joint rotation.
+- Runtime scheduler now applies cooldown circuit-breaker and weighted score selection based on priority, success/failure history, fail streak, and latency.
+- Retry backoff is now classified by error type (timeout/proxy/rate-limit/access-limit) with differentiated wait intervals.
 - Diff data for each run is persisted in `crawl_diffs` and `crawl_diff_items`, and also returned in `result["storage"]["diff"]` (`new/updated/unchanged/missing`).
 - For stable production crawling, combine browser automation with request-level API parsing and retry strategy.
 

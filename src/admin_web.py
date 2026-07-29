@@ -276,6 +276,11 @@ def create_app(db_path: str | None = None) -> Flask:
                     f"代理池命中: {proxy_meta.get('proxy_name')} ({proxy_meta.get('health')})",
                     "success",
                 )
+            scheduler_meta = result.get("crawl", {}).get("crawler_meta", {}).get("scheduler", {})
+            if isinstance(scheduler_meta, dict):
+                attempts_total = scheduler_meta.get("attempts_total")
+                if isinstance(attempts_total, int):
+                    flash(f"调度尝试次数: {attempts_total}", "success")
             return redirect(url_for("run_detail", run_id=run_id))
         except Exception as exc:  # noqa: BLE001
             flash(f"抓取失败: {exc}", "error")
