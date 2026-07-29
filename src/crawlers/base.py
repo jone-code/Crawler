@@ -22,6 +22,7 @@ class BaseCrawler(ABC):
         *,
         headless: bool = True,
         cookies_path: str | None = None,
+        proxy_server: str | None = None,
         timeout_ms: int = 30000,
         max_retry_attempts: int = 3,
         retry_backoff_seconds: float = 2.0,
@@ -30,6 +31,7 @@ class BaseCrawler(ABC):
     ) -> None:
         self.headless = headless
         self.cookies_path = cookies_path
+        self.proxy_server = proxy_server
         self.timeout_ms = timeout_ms
         self.max_retry_attempts = max(1, max_retry_attempts)
         self.retry_backoff_seconds = max(0.5, retry_backoff_seconds)
@@ -38,6 +40,7 @@ class BaseCrawler(ABC):
         self.crawler_meta: dict[str, Any] = {
             "retry": {"attempts": 0, "errors": []},
             "session": {"cookie_file": self.cookies_path, "cookie_health": "unknown", "warnings": []},
+            "proxy": {"proxy_server": self.proxy_server, "enabled": bool(self.proxy_server)},
         }
 
     async def crawl(
@@ -50,9 +53,13 @@ class BaseCrawler(ABC):
             "retry": {"attempts": 0, "errors": []},
             "session": {"cookie_file": self.cookies_path, "cookie_health": "unknown", "warnings": []},
             "pagination": {},
+            "proxy": {"proxy_server": self.proxy_server, "enabled": bool(self.proxy_server)},
         }
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=self.headless)
+            launch_kwargs: dict[str, Any] = {"headless": self.headless}
+            if self.proxy_server:
+                launch_kwargs["proxy"] = self._build_proxy_settings(self.proxy_server)
+            browser = await p.chromium.launch(**launch_kwargs)
             context = await self._new_context(browser, creator_url)
             page = await context.new_page()
 
@@ -79,6 +86,29 @@ class BaseCrawler(ABC):
         if self.cookies_path:
             await self._load_cookies(context, domain)
         return context
+
+    def _build_proxy_settings(self, proxy_server: str) -> dict[str, str]:
+        value = proxy_server.strip()
+        if not value:
+            raise ValueError("proxy_server cannot be empty")
+        if "://" not in value:
+            value = f"http://{value}"
+        parsed = urlparse(value)
+        if not parsed.scheme or not parsed.hostname:
+            raise ValueError(f"invalid proxy_server: {proxy_server}")
+
+        server = f"{parsed.scheme}://{parsed.hostname}"
+        if parsed.port:
+            server += f":{parsed.port}"
+
+        settings: dict[str, str] = {"server": server}
+        if parsed.username:
+            settings["username"] = parsed.username
+        if parsed.password:
+            settings["password"] = parsed.password
+        self.crawler_meta["proxy"]["resolved_server"] = server
+        self.crawler_meta["proxy"]["has_auth"] = bool(parsed.username)
+        return settings
 
     async def _load_cookies(self, context: BrowserContext, domain: str) -> None:
         cookies_file = Path(self.cookies_path)  # type: ignore[arg-type]

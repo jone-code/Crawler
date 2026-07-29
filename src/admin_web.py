@@ -9,11 +9,14 @@ from flask import Flask, flash, redirect, render_template, request, url_for
 
 from .service import (
     add_crawl_account,
+    add_crawl_proxy,
     add_creator_id,
     crawl_creator_by_id_and_store_sync,
     list_crawl_account_pool,
+    list_crawl_proxy_pool,
     list_creator_ids,
     toggle_crawl_account,
+    toggle_crawl_proxy,
 )
 from .storage import init_sqlite_db, set_creator_enabled
 from .storage.sqlite_store import DEFAULT_DB_PATH
@@ -31,11 +34,13 @@ def create_app(db_path: str | None = None) -> Flask:
     def dashboard():
         creators = list_creator_ids(db_path=app.config["DB_PATH"], enabled_only=False)
         accounts = list_crawl_account_pool(db_path=app.config["DB_PATH"], enabled_only=False)
+        proxies = list_crawl_proxy_pool(db_path=app.config["DB_PATH"], enabled_only=False)
         recent_runs = _list_recent_runs(app.config["DB_PATH"], limit=50)
         return render_template(
             "dashboard.html",
             creators=creators,
             accounts=accounts,
+            proxies=proxies,
             recent_runs=recent_runs,
             default_db_path=app.config["DB_PATH"],
         )
@@ -151,6 +156,66 @@ def create_app(db_path: str | None = None) -> Flask:
             flash(f"更新账号状态失败: {exc}", "error")
         return redirect(url_for("dashboard"))
 
+    @app.post("/proxies")
+    def create_proxy():
+        platform = (request.form.get("platform") or "").strip()
+        proxy_name = (request.form.get("proxy_name") or "").strip()
+        proxy_url = (request.form.get("proxy_url") or "").strip()
+        metadata_text = (request.form.get("metadata_json") or "").strip()
+        enabled = request.form.get("enabled") == "on"
+        try:
+            priority = int((request.form.get("priority") or "100").strip())
+        except ValueError:
+            priority = 100
+        metadata: dict[str, Any] | None = None
+        if metadata_text:
+            try:
+                parsed = json.loads(metadata_text)
+                if isinstance(parsed, dict):
+                    metadata = parsed
+            except json.JSONDecodeError as exc:
+                flash(f"代理 metadata JSON 解析失败: {exc}", "error")
+                return redirect(url_for("dashboard"))
+        try:
+            proxy = add_crawl_proxy(
+                platform=platform,  # type: ignore[arg-type]
+                proxy_name=proxy_name,
+                proxy_url=proxy_url,
+                db_path=app.config["DB_PATH"],
+                enabled=enabled,
+                priority=priority,
+                metadata=metadata,
+            )
+            flash(
+                f"已保存代理: {proxy['platform']} / {proxy['proxy_name']}",
+                "success",
+            )
+        except Exception as exc:  # noqa: BLE001
+            flash(f"保存代理失败: {exc}", "error")
+        return redirect(url_for("dashboard"))
+
+    @app.post("/proxies/toggle")
+    def toggle_proxy():
+        try:
+            proxy_id = int((request.form.get("proxy_id") or "0").strip())
+        except ValueError:
+            proxy_id = 0
+        enabled = request.form.get("enabled") == "1"
+        if proxy_id <= 0:
+            flash("代理ID无效", "error")
+            return redirect(url_for("dashboard"))
+        try:
+            toggle_crawl_proxy(
+                proxy_id=proxy_id,
+                enabled=enabled,
+                db_path=app.config["DB_PATH"],
+            )
+            state = "启用" if enabled else "停用"
+            flash(f"已{state}代理 id={proxy_id}", "success")
+        except Exception as exc:  # noqa: BLE001
+            flash(f"更新代理状态失败: {exc}", "error")
+        return redirect(url_for("dashboard"))
+
     @app.post("/crawl")
     def trigger_crawl():
         platform = (request.form.get("platform") or "").strip()
@@ -159,6 +224,7 @@ def create_app(db_path: str | None = None) -> Flask:
         media_root = (request.form.get("media_root") or "").strip() or "data/media"
         download_media = request.form.get("download_media") == "on"
         use_account_pool = request.form.get("use_account_pool") == "on"
+        use_proxy_pool = request.form.get("use_proxy_pool") == "on"
         try:
             max_items = int((request.form.get("max_items") or "20").strip())
         except ValueError:
@@ -175,6 +241,7 @@ def create_app(db_path: str | None = None) -> Flask:
                 download_media=download_media,
                 media_root=media_root,
                 use_account_pool=use_account_pool,
+                use_proxy_pool=use_proxy_pool,
             )
             run_id = result["storage"]["run_id"]
             diff = result["storage"]["diff"]
@@ -201,6 +268,12 @@ def create_app(db_path: str | None = None) -> Flask:
             if isinstance(account_meta, dict) and account_meta.get("account_name"):
                 flash(
                     f"账号池命中: {account_meta.get('account_name')} ({account_meta.get('health')})",
+                    "success",
+                )
+            proxy_meta = result.get("crawl", {}).get("crawler_meta", {}).get("proxy", {})
+            if isinstance(proxy_meta, dict) and proxy_meta.get("proxy_name"):
+                flash(
+                    f"代理池命中: {proxy_meta.get('proxy_name')} ({proxy_meta.get('health')})",
                     "success",
                 )
             return redirect(url_for("run_detail", run_id=run_id))

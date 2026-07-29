@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Literal
 
 from .crawlers import DouyinCrawler, XiaohongshuCrawler
@@ -8,13 +9,17 @@ from .media_downloader import download_post_media
 from .storage import (
     get_crawl_checkpoint,
     list_crawl_accounts,
+    list_crawl_proxies,
     mark_crawl_account_result,
+    mark_crawl_proxy_result,
     list_creators,
     mark_creator_crawled,
     register_crawl_account,
+    register_crawl_proxy,
     register_creator,
     save_creator_content,
     set_crawl_account_enabled,
+    set_crawl_proxy_enabled,
     upsert_crawl_checkpoint,
 )
 
@@ -26,11 +31,20 @@ def create_crawler(
     *,
     headless: bool = True,
     cookies_path: str | None = None,
+    proxy_server: str | None = None,
 ):
     if platform == "xiaohongshu":
-        return XiaohongshuCrawler(headless=headless, cookies_path=cookies_path)
+        return XiaohongshuCrawler(
+            headless=headless,
+            cookies_path=cookies_path,
+            proxy_server=proxy_server,
+        )
     if platform == "douyin":
-        return DouyinCrawler(headless=headless, cookies_path=cookies_path)
+        return DouyinCrawler(
+            headless=headless,
+            cookies_path=cookies_path,
+            proxy_server=proxy_server,
+        )
     raise ValueError(f"Unsupported platform: {platform}")
 
 
@@ -55,16 +69,22 @@ async def crawl_creator(
     checkpoint_db_path: str = "data/crawler.db",
     use_account_pool: bool = False,
     account_pool_db_path: str = "data/crawler.db",
+    use_proxy_pool: bool = False,
+    proxy_pool_db_path: str = "data/crawler.db",
 ) -> dict:
-    if use_account_pool and not cookies_path:
-        return await _crawl_with_account_pool(
+    if use_account_pool or use_proxy_pool:
+        return await _crawl_with_pool_rotation(
             platform=platform,
             creator_url=creator_url,
             max_items=max_items,
             headless=headless,
+            cookies_path=cookies_path,
             use_checkpoint=use_checkpoint,
             checkpoint_db_path=checkpoint_db_path,
+            use_account_pool=use_account_pool,
             account_pool_db_path=account_pool_db_path,
+            use_proxy_pool=use_proxy_pool,
+            proxy_pool_db_path=proxy_pool_db_path,
         )
 
     payload = await _crawl_once(
@@ -73,6 +93,7 @@ async def crawl_creator(
         max_items=max_items,
         headless=headless,
         cookies_path=cookies_path,
+        proxy_server=None,
         use_checkpoint=use_checkpoint,
         checkpoint_db_path=checkpoint_db_path,
     )
@@ -86,6 +107,7 @@ async def _crawl_once(
     max_items: int,
     headless: bool,
     cookies_path: str | None,
+    proxy_server: str | None,
     use_checkpoint: bool,
     checkpoint_db_path: str,
 ) -> dict:
@@ -100,77 +122,130 @@ async def _crawl_once(
         platform,
         headless=headless,
         cookies_path=cookies_path,
+        proxy_server=proxy_server,
     )
     result = await crawler.crawl(creator_url, max_items=max_items, checkpoint=checkpoint)
     return result.to_dict()
 
 
-async def _crawl_with_account_pool(
+async def _crawl_with_pool_rotation(
     *,
     platform: Platform,
     creator_url: str,
     max_items: int,
     headless: bool,
+    cookies_path: str | None,
     use_checkpoint: bool,
     checkpoint_db_path: str,
+    use_account_pool: bool,
     account_pool_db_path: str,
+    use_proxy_pool: bool,
+    proxy_pool_db_path: str,
 ) -> dict:
-    accounts = list_crawl_accounts(
-        platform=platform,
-        enabled_only=True,
-        db_path=account_pool_db_path,
-    )
-    if not accounts:
-        raise RuntimeError(f"no enabled crawl accounts for platform={platform}")
-
-    errors: list[str] = []
-    for account in accounts:
-        account_id = account["id"]
-        account_name = account["account_name"]
-        cookies_path = account["cookies_path"]
-        try:
-            payload = await _crawl_once(
-                platform=platform,
-                creator_url=creator_url,
-                max_items=max_items,
-                headless=headless,
-                cookies_path=cookies_path,
-                use_checkpoint=use_checkpoint,
-                checkpoint_db_path=checkpoint_db_path,
-            )
-        except Exception as exc:  # noqa: BLE001
-            mark_crawl_account_result(
-                account_id=account_id,
-                success=False,
-                health="error",
-                error=str(exc),
-                db_path=account_pool_db_path,
-            )
-            errors.append(f"account={account_name} error={exc}")
-            continue
-
-        success, health, error = _evaluate_crawl_health(platform=platform, payload=payload)
-        mark_crawl_account_result(
-            account_id=account_id,
-            success=success,
-            health=health,
-            error=error,
+    account_candidates: list[dict | None]
+    if use_account_pool:
+        accounts = list_crawl_accounts(
+            platform=platform,
+            enabled_only=True,
             db_path=account_pool_db_path,
         )
-        payload.setdefault("crawler_meta", {})
-        payload["crawler_meta"]["account"] = {
-            "id": account_id,
-            "account_name": account_name,
-            "cookies_path": cookies_path,
-            "health": health,
-            "success": success,
-            "error": error,
-        }
-        if success:
-            return payload
-        errors.append(f"account={account_name} health={health} error={error}")
+        if not accounts:
+            raise RuntimeError(f"no enabled crawl accounts for platform={platform}")
+        account_candidates = list(accounts)
+    else:
+        account_candidates = [None]
 
-    raise RuntimeError("all crawl accounts failed: " + " | ".join(errors))
+    proxy_candidates: list[dict | None]
+    if use_proxy_pool:
+        proxies = list_crawl_proxies(
+            platform=platform,
+            enabled_only=True,
+            db_path=proxy_pool_db_path,
+        )
+        if not proxies:
+            raise RuntimeError(f"no enabled crawl proxies for platform={platform}")
+        proxy_candidates = list(proxies)
+    else:
+        proxy_candidates = [None]
+
+    errors: list[str] = []
+    for account in account_candidates:
+        account_id = account["id"] if isinstance(account, dict) else None
+        account_name = account["account_name"] if isinstance(account, dict) else "direct"
+        account_cookies_path = (
+            account["cookies_path"] if isinstance(account, dict) else cookies_path
+        )
+
+        for proxy in proxy_candidates:
+            proxy_id = proxy["id"] if isinstance(proxy, dict) else None
+            proxy_name = proxy["proxy_name"] if isinstance(proxy, dict) else "direct"
+            proxy_server = proxy["proxy_url"] if isinstance(proxy, dict) else None
+
+            started_at = time.monotonic()
+            try:
+                payload = await _crawl_once(
+                    platform=platform,
+                    creator_url=creator_url,
+                    max_items=max_items,
+                    headless=headless,
+                    cookies_path=account_cookies_path,
+                    proxy_server=proxy_server,
+                    use_checkpoint=use_checkpoint,
+                    checkpoint_db_path=checkpoint_db_path,
+                )
+                success, health, error = _evaluate_crawl_health(platform=platform, payload=payload)
+            except Exception as exc:  # noqa: BLE001
+                payload = {}
+                success = False
+                health = "error"
+                error = str(exc)
+            latency_ms = int((time.monotonic() - started_at) * 1000)
+
+            if isinstance(account_id, int):
+                mark_crawl_account_result(
+                    account_id=account_id,
+                    success=success,
+                    health=health,
+                    error=error,
+                    db_path=account_pool_db_path,
+                )
+            if isinstance(proxy_id, int):
+                mark_crawl_proxy_result(
+                    proxy_id=proxy_id,
+                    success=success,
+                    health=health,
+                    error=error,
+                    latency_ms=latency_ms,
+                    db_path=proxy_pool_db_path,
+                )
+
+            if success:
+                payload.setdefault("crawler_meta", {})
+                payload["crawler_meta"]["account"] = {
+                    "id": account_id,
+                    "account_name": account_name,
+                    "cookies_path": account_cookies_path,
+                    "health": health,
+                    "success": success,
+                    "error": error,
+                }
+                payload["crawler_meta"]["proxy"] = {
+                    "id": proxy_id,
+                    "proxy_name": proxy_name,
+                    "proxy_server": proxy_server,
+                    "health": health,
+                    "success": success,
+                    "error": error,
+                    "latency_ms": latency_ms,
+                }
+                return payload
+
+            errors.append(
+                f"account={account_name} proxy={proxy_name} health={health} "
+                f"latency_ms={latency_ms} error={error}"
+            )
+
+    raise RuntimeError("all pool candidates failed: " + " | ".join(errors))
 
 
 def _evaluate_crawl_health(*, platform: Platform, payload: dict) -> tuple[bool, str, str | None]:
@@ -203,6 +278,8 @@ def crawl_creator_sync(
     checkpoint_db_path: str = "data/crawler.db",
     use_account_pool: bool = False,
     account_pool_db_path: str = "data/crawler.db",
+    use_proxy_pool: bool = False,
+    proxy_pool_db_path: str = "data/crawler.db",
 ) -> dict:
     return asyncio.run(
         crawl_creator(
@@ -215,6 +292,8 @@ def crawl_creator_sync(
             checkpoint_db_path=checkpoint_db_path,
             use_account_pool=use_account_pool,
             account_pool_db_path=account_pool_db_path,
+            use_proxy_pool=use_proxy_pool,
+            proxy_pool_db_path=proxy_pool_db_path,
         )
     )
 
@@ -295,6 +374,49 @@ def toggle_crawl_account(
     set_crawl_account_enabled(account_id=account_id, enabled=enabled, db_path=db_path)
 
 
+def add_crawl_proxy(
+    *,
+    platform: Platform,
+    proxy_name: str,
+    proxy_url: str,
+    db_path: str = "data/crawler.db",
+    enabled: bool = True,
+    priority: int = 100,
+    metadata: dict | None = None,
+) -> dict:
+    return register_crawl_proxy(
+        platform=platform,
+        proxy_name=proxy_name,
+        proxy_url=proxy_url,
+        db_path=db_path,
+        enabled=enabled,
+        priority=priority,
+        metadata=metadata,
+    )
+
+
+def list_crawl_proxy_pool(
+    *,
+    db_path: str = "data/crawler.db",
+    platform: Platform | None = None,
+    enabled_only: bool = False,
+) -> list[dict]:
+    return list_crawl_proxies(
+        db_path=db_path,
+        platform=platform,
+        enabled_only=enabled_only,
+    )
+
+
+def toggle_crawl_proxy(
+    *,
+    proxy_id: int,
+    enabled: bool,
+    db_path: str = "data/crawler.db",
+) -> None:
+    set_crawl_proxy_enabled(proxy_id=proxy_id, enabled=enabled, db_path=db_path)
+
+
 async def crawl_creator_by_id(
     *,
     platform: Platform,
@@ -306,6 +428,8 @@ async def crawl_creator_by_id(
     checkpoint_db_path: str = "data/crawler.db",
     use_account_pool: bool = False,
     account_pool_db_path: str = "data/crawler.db",
+    use_proxy_pool: bool = False,
+    proxy_pool_db_path: str = "data/crawler.db",
 ) -> dict:
     creator_url = build_creator_url(platform, creator_id)
     return await crawl_creator(
@@ -318,6 +442,8 @@ async def crawl_creator_by_id(
         checkpoint_db_path=checkpoint_db_path,
         use_account_pool=use_account_pool,
         account_pool_db_path=account_pool_db_path,
+        use_proxy_pool=use_proxy_pool,
+        proxy_pool_db_path=proxy_pool_db_path,
     )
 
 
@@ -332,6 +458,8 @@ def crawl_creator_by_id_sync(
     checkpoint_db_path: str = "data/crawler.db",
     use_account_pool: bool = False,
     account_pool_db_path: str = "data/crawler.db",
+    use_proxy_pool: bool = False,
+    proxy_pool_db_path: str = "data/crawler.db",
 ) -> dict:
     return asyncio.run(
         crawl_creator_by_id(
@@ -344,6 +472,8 @@ def crawl_creator_by_id_sync(
             checkpoint_db_path=checkpoint_db_path,
             use_account_pool=use_account_pool,
             account_pool_db_path=account_pool_db_path,
+            use_proxy_pool=use_proxy_pool,
+            proxy_pool_db_path=proxy_pool_db_path,
         )
     )
 
@@ -360,6 +490,7 @@ async def crawl_creator_and_store(
     media_root: str = "data/media",
     use_checkpoint: bool = True,
     use_account_pool: bool = False,
+    use_proxy_pool: bool = False,
 ) -> dict:
     payload = await crawl_creator(
         platform=platform,
@@ -371,6 +502,8 @@ async def crawl_creator_and_store(
         checkpoint_db_path=db_path,
         use_account_pool=use_account_pool,
         account_pool_db_path=db_path,
+        use_proxy_pool=use_proxy_pool,
+        proxy_pool_db_path=db_path,
     )
     media_result: dict | None = None
     if download_media:
@@ -398,6 +531,7 @@ def crawl_creator_and_store_sync(
     media_root: str = "data/media",
     use_checkpoint: bool = True,
     use_account_pool: bool = False,
+    use_proxy_pool: bool = False,
 ) -> dict:
     return asyncio.run(
         crawl_creator_and_store(
@@ -411,6 +545,7 @@ def crawl_creator_and_store_sync(
             media_root=media_root,
             use_checkpoint=use_checkpoint,
             use_account_pool=use_account_pool,
+            use_proxy_pool=use_proxy_pool,
         )
     )
 
@@ -427,6 +562,7 @@ async def crawl_creator_by_id_and_store(
     media_root: str = "data/media",
     use_checkpoint: bool = True,
     use_account_pool: bool = False,
+    use_proxy_pool: bool = False,
 ) -> dict:
     creator_url = build_creator_url(platform, creator_id)
     # Ensure backend creator registry has this id for later scheduling/management.
@@ -447,6 +583,7 @@ async def crawl_creator_by_id_and_store(
         media_root=media_root,
         use_checkpoint=use_checkpoint,
         use_account_pool=use_account_pool,
+        use_proxy_pool=use_proxy_pool,
     )
     crawl_time_utc = result["crawl"].get("crawl_time_utc")
     if isinstance(crawl_time_utc, str) and crawl_time_utc:
@@ -471,6 +608,7 @@ def crawl_creator_by_id_and_store_sync(
     media_root: str = "data/media",
     use_checkpoint: bool = True,
     use_account_pool: bool = False,
+    use_proxy_pool: bool = False,
 ) -> dict:
     return asyncio.run(
         crawl_creator_by_id_and_store(
@@ -484,6 +622,7 @@ def crawl_creator_by_id_and_store_sync(
             media_root=media_root,
             use_checkpoint=use_checkpoint,
             use_account_pool=use_account_pool,
+            use_proxy_pool=use_proxy_pool,
         )
     )
 

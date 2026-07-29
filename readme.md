@@ -15,6 +15,7 @@ This project crawls creator post lists from:
 - Backend creator-id registry (add/list creators)
 - Optional media downloading (images/videos)
 - Built-in admin web page (creator management + crawl runs + diff view)
+- Account pool + proxy pool rotation for anti-bot resilience
 
 ## Environment
 
@@ -43,6 +44,7 @@ Then open `http://127.0.0.1:8000` to:
 
 - add/enable/disable creators
 - manage crawl account pool (multi-account rotation)
+- manage crawl proxy pool (multi-proxy rotation)
 - trigger crawl jobs
 - inspect per-run diff summary (`new/updated/missing`)
 - inspect media download status
@@ -121,6 +123,7 @@ result = crawl_creator_by_id_and_store_sync(
     max_items=20,  # set 0 for continuous deep pagination
     use_checkpoint=True,  # resume from saved pagination checkpoint when max_items=0
     use_account_pool=True,  # use enabled accounts in crawl_accounts table
+    use_proxy_pool=True,  # use enabled proxies in crawl_proxies table
     db_path=DB_PATH,
     download_media=True,
     media_root="data/media",
@@ -154,6 +157,30 @@ add_crawl_account(
 )
 
 print(list_crawl_account_pool(db_path=DB_PATH, platform="xiaohongshu", enabled_only=True))
+```
+
+### Add Crawl Proxies (Proxy Pool)
+
+```python
+from src import add_crawl_proxy, list_crawl_proxy_pool
+
+DB_PATH = "data/crawler.db"
+add_crawl_proxy(
+    platform="xiaohongshu",
+    proxy_name="xhs_proxy_01",
+    proxy_url="http://user:pass@127.0.0.1:7890",
+    db_path=DB_PATH,
+    priority=100,
+)
+add_crawl_proxy(
+    platform="xiaohongshu",
+    proxy_name="xhs_proxy_02",
+    proxy_url="http://127.0.0.1:7891",
+    db_path=DB_PATH,
+    priority=200,
+)
+
+print(list_crawl_proxy_pool(db_path=DB_PATH, platform="xiaohongshu", enabled_only=True))
 ```
 
 ### Save Existing Payload to SQLite
@@ -212,5 +239,7 @@ save_creator_content(payload, db_path="data/crawler.db")
 - Crawler metadata now includes session diagnostics (`crawler_meta.session`) and pagination diagnostics (`crawler_meta.pagination`).
 - Built-in retry/backoff and jitter delays are enabled to reduce transient anti-bot failures.
 - Multi-account pool is supported via `crawl_accounts`; when `use_account_pool=True`, accounts are tried in priority order and auto-switched on failure.
+- IP proxy pool is supported via `crawl_proxies`; when `use_proxy_pool=True`, proxies are tried in priority order and auto-switched on failure.
+- `use_account_pool=True` and `use_proxy_pool=True` can be enabled together to run account + proxy joint rotation.
 - Diff data for each run is persisted in `crawl_diffs` and `crawl_diff_items`, and also returned in `result["storage"]["diff"]` (`new/updated/unchanged/missing`).
 - For stable production crawling, combine browser automation with request-level API parsing and retry strategy.

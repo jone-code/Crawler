@@ -53,6 +53,28 @@ def init_sqlite_db(db_path: str = DEFAULT_DB_PATH) -> None:
             CREATE INDEX IF NOT EXISTS idx_crawl_accounts_platform_enabled
               ON crawl_accounts(platform, enabled, priority, last_used_at_utc);
 
+            CREATE TABLE IF NOT EXISTS crawl_proxies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform TEXT NOT NULL,
+                proxy_name TEXT NOT NULL,
+                proxy_url TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                priority INTEGER NOT NULL DEFAULT 100,
+                fail_count INTEGER NOT NULL DEFAULT 0,
+                success_count INTEGER NOT NULL DEFAULT 0,
+                last_used_at_utc TEXT,
+                last_health TEXT,
+                last_error TEXT,
+                last_latency_ms INTEGER,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at_utc TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at_utc TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(platform, proxy_name)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_crawl_proxies_platform_enabled
+              ON crawl_proxies(platform, enabled, priority, last_used_at_utc);
+
             CREATE TABLE IF NOT EXISTS crawl_checkpoints (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 platform TEXT NOT NULL,
@@ -579,6 +601,178 @@ def mark_crawl_account_result(
         conn.commit()
 
 
+def register_crawl_proxy(
+    *,
+    platform: str,
+    proxy_name: str,
+    proxy_url: str,
+    enabled: bool = True,
+    priority: int = 100,
+    metadata: dict[str, Any] | None = None,
+    db_path: str = DEFAULT_DB_PATH,
+) -> dict[str, Any]:
+    if not proxy_name.strip():
+        raise ValueError("proxy_name cannot be empty")
+    if not proxy_url.strip():
+        raise ValueError("proxy_url cannot be empty")
+
+    init_sqlite_db(db_path=db_path)
+    metadata_payload = metadata or {}
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO crawl_proxies (
+                platform,
+                proxy_name,
+                proxy_url,
+                enabled,
+                priority,
+                metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(platform, proxy_name) DO UPDATE SET
+                proxy_url = excluded.proxy_url,
+                enabled = excluded.enabled,
+                priority = excluded.priority,
+                metadata_json = excluded.metadata_json,
+                updated_at_utc = datetime('now')
+            """,
+            (
+                platform,
+                proxy_name,
+                proxy_url,
+                1 if enabled else 0,
+                priority,
+                json.dumps(metadata_payload, ensure_ascii=False),
+            ),
+        )
+        row = conn.execute(
+            """
+            SELECT
+                id,
+                platform,
+                proxy_name,
+                proxy_url,
+                enabled,
+                priority,
+                fail_count,
+                success_count,
+                last_used_at_utc,
+                last_health,
+                last_error,
+                last_latency_ms,
+                metadata_json,
+                created_at_utc,
+                updated_at_utc
+            FROM crawl_proxies
+            WHERE platform = ? AND proxy_name = ?
+            """,
+            (platform, proxy_name),
+        ).fetchone()
+
+    if row is None:
+        raise RuntimeError("failed to register crawl proxy")
+    return _crawl_proxy_row_to_dict(row)
+
+
+def list_crawl_proxies(
+    *,
+    platform: str | None = None,
+    enabled_only: bool = False,
+    db_path: str = DEFAULT_DB_PATH,
+) -> list[dict[str, Any]]:
+    init_sqlite_db(db_path=db_path)
+    query = """
+        SELECT
+            id,
+            platform,
+            proxy_name,
+            proxy_url,
+            enabled,
+            priority,
+            fail_count,
+            success_count,
+            last_used_at_utc,
+            last_health,
+            last_error,
+            last_latency_ms,
+            metadata_json,
+            created_at_utc,
+            updated_at_utc
+        FROM crawl_proxies
+    """
+    filters: list[str] = []
+    params: list[Any] = []
+    if platform:
+        filters.append("platform = ?")
+        params.append(platform)
+    if enabled_only:
+        filters.append("enabled = 1")
+    if filters:
+        query += " WHERE " + " AND ".join(filters)
+    query += " ORDER BY priority ASC, COALESCE(last_used_at_utc, ''), id ASC"
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [_crawl_proxy_row_to_dict(row) for row in rows]
+
+
+def set_crawl_proxy_enabled(
+    *,
+    proxy_id: int,
+    enabled: bool,
+    db_path: str = DEFAULT_DB_PATH,
+) -> None:
+    init_sqlite_db(db_path=db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE crawl_proxies
+            SET
+                enabled = ?,
+                updated_at_utc = datetime('now')
+            WHERE id = ?
+            """,
+            (1 if enabled else 0, proxy_id),
+        )
+        conn.commit()
+
+
+def mark_crawl_proxy_result(
+    *,
+    proxy_id: int,
+    success: bool,
+    health: str | None = None,
+    error: str | None = None,
+    latency_ms: int | None = None,
+    db_path: str = DEFAULT_DB_PATH,
+) -> None:
+    init_sqlite_db(db_path=db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE crawl_proxies
+            SET
+                success_count = success_count + ?,
+                fail_count = fail_count + ?,
+                last_used_at_utc = datetime('now'),
+                last_health = ?,
+                last_error = ?,
+                last_latency_ms = ?,
+                updated_at_utc = datetime('now')
+            WHERE id = ?
+            """,
+            (
+                1 if success else 0,
+                0 if success else 1,
+                health,
+                error,
+                latency_ms,
+                proxy_id,
+            ),
+        )
+        conn.commit()
+
+
 def get_crawl_checkpoint(
     *,
     platform: str,
@@ -679,6 +873,31 @@ def _crawl_account_row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
         "metadata": metadata,
         "created_at_utc": row[12],
         "updated_at_utc": row[13],
+    }
+
+
+def _crawl_proxy_row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
+    metadata_text = row[12] if isinstance(row[12], str) else "{}"
+    try:
+        metadata = json.loads(metadata_text)
+    except json.JSONDecodeError:
+        metadata = {}
+    return {
+        "id": row[0],
+        "platform": row[1],
+        "proxy_name": row[2],
+        "proxy_url": row[3],
+        "enabled": bool(row[4]),
+        "priority": row[5],
+        "fail_count": row[6],
+        "success_count": row[7],
+        "last_used_at_utc": row[8],
+        "last_health": row[9],
+        "last_error": row[10],
+        "last_latency_ms": row[11],
+        "metadata": metadata,
+        "created_at_utc": row[13],
+        "updated_at_utc": row[14],
     }
 
 
