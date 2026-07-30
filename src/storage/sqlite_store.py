@@ -259,6 +259,25 @@ def init_sqlite_db(db_path: str = DEFAULT_DB_PATH) -> None:
 
             CREATE INDEX IF NOT EXISTS idx_scheduler_cycle_run_items_run
               ON scheduler_cycle_run_items(cycle_run_id, id ASC);
+
+            CREATE TABLE IF NOT EXISTS admin_action_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                actor TEXT NOT NULL,
+                action TEXT NOT NULL,
+                success INTEGER NOT NULL,
+                target_type TEXT,
+                target_id TEXT,
+                details_json TEXT NOT NULL DEFAULT '{}',
+                remote_addr TEXT,
+                user_agent TEXT,
+                created_at_utc TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_admin_action_logs_recent
+              ON admin_action_logs(id DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_admin_action_logs_action_time
+              ON admin_action_logs(action, created_at_utc DESC);
             """
         )
         _run_schema_migrations(conn)
@@ -1629,6 +1648,105 @@ def list_scheduler_cycle_run_items(
             "error": row[8],
             "details": _safe_json_object(row[9]),
             "created_at_utc": row[10],
+        }
+        for row in rows
+    ]
+
+
+def add_admin_action_log(
+    *,
+    actor: str,
+    action: str,
+    success: bool,
+    target_type: str | None = None,
+    target_id: str | None = None,
+    details: dict[str, Any] | None = None,
+    remote_addr: str | None = None,
+    user_agent: str | None = None,
+    db_path: str = DEFAULT_DB_PATH,
+) -> None:
+    if not actor.strip():
+        raise ValueError("actor cannot be empty")
+    if not action.strip():
+        raise ValueError("action cannot be empty")
+    init_sqlite_db(db_path=db_path)
+    details_payload = details or {}
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO admin_action_logs (
+                actor,
+                action,
+                success,
+                target_type,
+                target_id,
+                details_json,
+                remote_addr,
+                user_agent
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                actor.strip(),
+                action.strip(),
+                1 if success else 0,
+                target_type.strip() if isinstance(target_type, str) and target_type.strip() else None,
+                target_id.strip() if isinstance(target_id, str) and target_id.strip() else None,
+                json.dumps(details_payload, ensure_ascii=False),
+                remote_addr,
+                user_agent,
+            ),
+        )
+        conn.commit()
+
+
+def list_admin_action_logs(
+    *,
+    db_path: str = DEFAULT_DB_PATH,
+    limit: int = 200,
+    action: str | None = None,
+    success: bool | None = None,
+) -> list[dict[str, Any]]:
+    init_sqlite_db(db_path=db_path)
+    query = """
+        SELECT
+            id,
+            actor,
+            action,
+            success,
+            target_type,
+            target_id,
+            details_json,
+            remote_addr,
+            user_agent,
+            created_at_utc
+        FROM admin_action_logs
+    """
+    filters: list[str] = []
+    params: list[Any] = []
+    if isinstance(action, str) and action.strip():
+        filters.append("action = ?")
+        params.append(action.strip())
+    if success is not None:
+        filters.append("success = ?")
+        params.append(1 if success else 0)
+    if filters:
+        query += " WHERE " + " AND ".join(filters)
+    query += " ORDER BY id DESC LIMIT ?"
+    params.append(max(1, int(limit)))
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [
+        {
+            "id": row[0],
+            "actor": row[1],
+            "action": row[2],
+            "success": bool(row[3]),
+            "target_type": row[4],
+            "target_id": row[5],
+            "details": _safe_json_object(row[6]),
+            "remote_addr": row[7],
+            "user_agent": row[8],
+            "created_at_utc": row[9],
         }
         for row in rows
     ]

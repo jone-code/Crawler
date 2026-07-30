@@ -33,6 +33,7 @@ from .scheduler import (
 )
 from .storage import (
     acquire_scheduler_lock,
+    add_admin_action_log,
     add_scheduler_cycle_run_item,
     create_scheduler_cycle_run,
     finish_scheduler_cycle_run,
@@ -41,6 +42,7 @@ from .storage import (
     init_sqlite_db,
     list_pool_health_events,
     list_pool_health_trends,
+    list_admin_action_logs,
     list_creators,
     list_crawl_accounts,
     list_crawl_proxies,
@@ -95,8 +97,10 @@ __all__ = [
     "init_sqlite_db",
     "save_creator_content",
     "add_pool_health_event",
+    "add_admin_action_log",
     "list_pool_health_events",
     "list_pool_health_trends",
+    "list_admin_action_logs",
     "acquire_scheduler_lock",
     "release_scheduler_lock",
     "create_scheduler_cycle_run",

@@ -34,6 +34,14 @@
   <body>
     <h1>Crawler Admin</h1>
     <p class="muted">数据库: <code>{{ default_db_path }}</code></p>
+    {% if auth_enabled %}
+    <p class="muted">
+      当前登录: <code>{{ current_admin_user }}</code>
+      <form method="post" action="/logout" class="inline-form" style="margin-left:8px;">
+        <button class="secondary" type="submit">退出登录</button>
+      </form>
+    </p>
+    {% endif %}
 
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages %}
@@ -550,6 +558,56 @@
           </tr>
           {% else %}
           <tr><td colspan="8">暂无任务明细</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <h2>失败任务重试</h2>
+      <p class="muted">
+        当前周期失败抓取任务数: <code>{{ failed_scheduler_items | length }}</code>
+      </p>
+      <form method="post" action="/scheduler/retry-failed">
+        <input type="hidden" name="cycle_run_id" value="{{ selected_cycle_id or '' }}" />
+        <label>重试任务上限（1-50）</label>
+        <input type="number" name="max_retry_items" value="10" min="1" max="50" />
+        <label>每次抓取 max_items（0=持续下探）</label>
+        <input type="number" name="max_items" value="20" min="0" />
+        <label><input type="checkbox" name="headless" checked style="width:auto;" /> Headless</label>
+        <label><input type="checkbox" name="use_checkpoint" checked style="width:auto;" /> 使用 checkpoint</label>
+        <label><input type="checkbox" name="use_account_pool" checked style="width:auto;" /> 使用账号池</label>
+        <label><input type="checkbox" name="use_proxy_pool" checked style="width:auto;" /> 使用代理池</label>
+        <label><input type="checkbox" name="download_media" style="width:auto;" /> 下载媒体</label>
+        <button type="submit">重试当前周期失败任务</button>
+      </form>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <h2>操作审计日志（最近100条）</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>时间</th>
+            <th>操作者</th>
+            <th>动作</th>
+            <th>结果</th>
+            <th>目标</th>
+            <th>详情</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for log in admin_action_logs %}
+          <tr>
+            <td>{{ log.created_at_utc }}</td>
+            <td><code>{{ log.actor }}</code></td>
+            <td>{{ log.action }}</td>
+            <td>{{ "ok" if log.success else "fail" }}</td>
+            <td>{{ log.target_type or "-" }} / <code>{{ log.target_id or "-" }}</code></td>
+            <td class="small"><code>{{ log.details | tojson }}</code></td>
+          </tr>
+          {% else %}
+          <tr><td colspan="6">暂无操作日志</td></tr>
           {% endfor %}
         </tbody>
       </table>
