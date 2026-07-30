@@ -26,7 +26,12 @@ from .service import (
     toggle_crawl_account,
     toggle_crawl_proxy,
 )
-from .storage import init_sqlite_db, set_creator_enabled
+from .storage import (
+    init_sqlite_db,
+    list_scheduler_cycle_run_items,
+    list_scheduler_cycle_runs,
+    set_creator_enabled,
+)
 from .storage.sqlite_store import DEFAULT_DB_PATH
 
 
@@ -76,6 +81,20 @@ def create_app(db_path: str | None = None) -> Flask:
             only_anomalies=only_abnormal,
             limit=100,
         )
+        scheduler_cycles = list_scheduler_cycle_runs(
+            db_path=app.config["DB_PATH"],
+            limit=20,
+        )
+        latest_cycle_id = (
+            int(scheduler_cycles[0]["id"])
+            if scheduler_cycles and isinstance(scheduler_cycles[0], dict)
+            else None
+        )
+        scheduler_cycle_items = list_scheduler_cycle_run_items(
+            db_path=app.config["DB_PATH"],
+            cycle_run_id=latest_cycle_id,
+            limit=100,
+        )
         recent_runs = _list_recent_runs(app.config["DB_PATH"], limit=50)
         return render_template(
             "dashboard.html",
@@ -89,6 +108,9 @@ def create_app(db_path: str | None = None) -> Flask:
             health_filter_resource_type=health_resource_type_raw or "all",
             health_filter_window_hours=health_window_hours,
             health_filter_only_abnormal=only_abnormal,
+            scheduler_cycles=scheduler_cycles,
+            scheduler_cycle_items=scheduler_cycle_items,
+            latest_cycle_id=latest_cycle_id,
             recent_runs=recent_runs,
             default_db_path=app.config["DB_PATH"],
         )

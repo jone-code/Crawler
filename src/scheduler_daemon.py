@@ -39,6 +39,16 @@ def main() -> None:
         use_proxy_pool=_bool_env("CRAWL_USE_PROXY_POOL", True),
         max_creators_per_cycle=_int_env("SCHEDULER_MAX_CREATORS_PER_CYCLE", 0),
         health_timeout_ms=_int_env("HEALTH_TIMEOUT_MS", 12000),
+        scheduler_name=(os.getenv("SCHEDULER_NAME", "crawler-main").strip() or "crawler-main"),
+        lock_key=(
+            os.getenv("SCHEDULER_LOCK_KEY", "crawler_scheduler_main_lock").strip()
+            or "crawler_scheduler_main_lock"
+        ),
+        lock_lease_seconds=_int_env("SCHEDULER_LOCK_LEASE_SECONDS", 1800),
+        lock_owner_id=(os.getenv("SCHEDULER_LOCK_OWNER_ID", "").strip() or None),
+        webhook_alert_url=(os.getenv("SCHEDULER_WEBHOOK_ALERT_URL", "").strip() or None),
+        webhook_alert_on_success=_bool_env("SCHEDULER_WEBHOOK_ALERT_ON_SUCCESS", False),
+        webhook_timeout_seconds=_int_env("SCHEDULER_WEBHOOK_TIMEOUT_SECONDS", 8),
     )
     tick_seconds = _int_env("SCHEDULER_TICK_SECONDS", 30)
     max_ticks = _int_env("SCHEDULER_MAX_TICKS", 0)

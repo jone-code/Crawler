@@ -1,16 +1,33 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import socket
 import time
+import urllib.error
+import urllib.request
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .service import crawl_creator_by_id_and_store, probe_pool_health
-from .storage import get_scheduler_state, list_creators, upsert_scheduler_state
+from .storage import (
+    acquire_scheduler_lock,
+    add_scheduler_cycle_run_item,
+    create_scheduler_cycle_run,
+    finish_scheduler_cycle_run,
+    get_scheduler_state,
+    list_creators,
+    release_scheduler_lock,
+    upsert_scheduler_state,
+)
 
 SCHEDULER_RUNTIME_STATE_KEY = "crawler_scheduler_runtime"
 DEFAULT_PLATFORMS = ("xiaohongshu", "douyin")
+DEFAULT_SCHEDULER_NAME = "crawler-main"
+DEFAULT_SCHEDULER_LOCK_KEY = "crawler_scheduler_main_lock"
 
 
 @dataclass
@@ -33,11 +50,19 @@ class SchedulerConfig:
     health_probe_accounts: bool = True
     health_probe_proxies: bool = True
     health_timeout_ms: int = 12000
+    scheduler_name: str = DEFAULT_SCHEDULER_NAME
+    lock_key: str = DEFAULT_SCHEDULER_LOCK_KEY
+    lock_lease_seconds: int = 1800
+    lock_owner_id: str | None = None
+    webhook_alert_url: str | None = None
+    webhook_alert_on_success: bool = False
+    webhook_timeout_seconds: int = 8
 
 
 class CrawlScheduler:
     def __init__(self, config: SchedulerConfig) -> None:
         self.config = config
+        self.lock_owner_id = config.lock_owner_id or _default_lock_owner_id()
 
     async def run_once(
         self,
@@ -57,6 +82,9 @@ class CrawlScheduler:
 
         result: dict[str, Any] = {
             "run_time_utc": now.isoformat(),
+            "scheduler_name": self.config.scheduler_name,
+            "lock_key": self.config.lock_key,
+            "lock_owner_id": self.lock_owner_id,
             "force_crawl": force_crawl,
             "force_health_check": force_health_check,
             "crawl_due": crawl_due,
@@ -65,29 +93,144 @@ class CrawlScheduler:
             "health_result": None,
             "runtime_state_before": runtime_state,
         }
-
-        if health_due:
-            result["health_result"] = await self._run_health_check_cycle()
-            runtime_state["last_health_check_cycle_utc"] = now.isoformat()
-        if crawl_due:
-            result["crawl_result"] = await self._run_crawl_cycle()
-            runtime_state["last_crawl_cycle_utc"] = now.isoformat()
-
-        runtime_state["last_scheduler_run_utc"] = now.isoformat()
-        upsert_scheduler_state(
-            state_key=SCHEDULER_RUNTIME_STATE_KEY,
-            value=runtime_state,
+        lock_result = acquire_scheduler_lock(
+            lock_key=self.config.lock_key,
+            owner_id=self.lock_owner_id,
+            lease_seconds=self.config.lock_lease_seconds,
+            metadata={
+                "scheduler_name": self.config.scheduler_name,
+                "run_time_utc": now.isoformat(),
+            },
             db_path=self.config.db_path,
         )
-        result["runtime_state_after"] = runtime_state
+        result["lock"] = lock_result
+        if not lock_result.get("acquired"):
+            runtime_state["last_scheduler_skip_utc"] = now.isoformat()
+            runtime_state["last_scheduler_skip_reason"] = "lock_not_acquired"
+            runtime_state["last_scheduler_skip_owner"] = lock_result.get("owner_id")
+            upsert_scheduler_state(
+                state_key=SCHEDULER_RUNTIME_STATE_KEY,
+                value=runtime_state,
+                db_path=self.config.db_path,
+            )
+            result["runtime_state_after"] = runtime_state
+            result["cycle_status"] = "skipped_lock_not_acquired"
+            return result
+
+        cycle_run_id: int | None = None
+        cycle_started = time.monotonic()
+        cycle_status = "failed"
+        cycle_error: str | None = None
+        alert_sent = False
+        alert_error: str | None = None
+
+        try:
+            cycle_run_id = create_scheduler_cycle_run(
+                scheduler_name=self.config.scheduler_name,
+                lock_key=self.config.lock_key,
+                lock_owner_id=self.lock_owner_id,
+                status="running",
+                force_crawl=force_crawl,
+                force_health_check=force_health_check,
+                crawl_due=crawl_due,
+                health_due=health_due,
+                metadata={"runtime_state_before": runtime_state},
+                db_path=self.config.db_path,
+            )
+            result["cycle_run_id"] = cycle_run_id
+            cycle_status = "success"
+
+            if health_due:
+                result["health_result"] = await self._run_health_check_cycle(cycle_run_id=cycle_run_id)
+                runtime_state["last_health_check_cycle_utc"] = now.isoformat()
+            if crawl_due:
+                result["crawl_result"] = await self._run_crawl_cycle(cycle_run_id=cycle_run_id)
+                runtime_state["last_crawl_cycle_utc"] = now.isoformat()
+
+            if not crawl_due and not health_due:
+                cycle_status = "no_due"
+            else:
+                crawl_failed = int((result.get("crawl_result") or {}).get("failed_count") or 0)
+                health_failed = int((result.get("health_result") or {}).get("failed_count") or 0)
+                if crawl_failed > 0 or health_failed > 0:
+                    cycle_status = "partial_failed"
+
+            runtime_state["last_scheduler_run_utc"] = now.isoformat()
+            runtime_state["last_cycle_run_id"] = cycle_run_id
+            upsert_scheduler_state(
+                state_key=SCHEDULER_RUNTIME_STATE_KEY,
+                value=runtime_state,
+                db_path=self.config.db_path,
+            )
+            result["runtime_state_after"] = runtime_state
+
+            if cycle_run_id is not None:
+                alert_sent, alert_error = await self._send_webhook_alert_if_needed(
+                    cycle_status=cycle_status,
+                    cycle_run_id=cycle_run_id,
+                    result=result,
+                )
+        except Exception as exc:  # noqa: BLE001
+            cycle_status = "failed"
+            cycle_error = str(exc)
+            result["error"] = cycle_error
+            runtime_state["last_scheduler_error_utc"] = now.isoformat()
+            runtime_state["last_scheduler_error"] = cycle_error
+            runtime_state["last_scheduler_run_utc"] = now.isoformat()
+            runtime_state["last_cycle_run_id"] = cycle_run_id
+            upsert_scheduler_state(
+                state_key=SCHEDULER_RUNTIME_STATE_KEY,
+                value=runtime_state,
+                db_path=self.config.db_path,
+            )
+            result["runtime_state_after"] = runtime_state
+            if cycle_run_id is not None:
+                alert_sent, alert_error = await self._send_webhook_alert_if_needed(
+                    cycle_status=cycle_status,
+                    cycle_run_id=cycle_run_id,
+                    result=result,
+                    cycle_error=cycle_error,
+                )
+        finally:
+            if cycle_run_id is not None:
+                crawl_success_count, crawl_failed_count = _extract_cycle_counts(
+                    result.get("crawl_result")
+                )
+                health_success_count, health_failed_count = _extract_cycle_counts(
+                    result.get("health_result")
+                )
+                finish_scheduler_cycle_run(
+                    cycle_run_id=cycle_run_id,
+                    status=cycle_status,
+                    crawl_success_count=crawl_success_count,
+                    crawl_failed_count=crawl_failed_count,
+                    health_success_count=health_success_count,
+                    health_failed_count=health_failed_count,
+                    alert_sent=alert_sent,
+                    alert_error=alert_error,
+                    error=cycle_error,
+                    metadata={
+                        "duration_ms": int((time.monotonic() - cycle_started) * 1000),
+                        "runtime_state_after": result.get("runtime_state_after"),
+                    },
+                    db_path=self.config.db_path,
+                )
+            result["lock_released"] = release_scheduler_lock(
+                lock_key=self.config.lock_key,
+                owner_id=self.lock_owner_id,
+                db_path=self.config.db_path,
+            )
+
+        result["cycle_status"] = cycle_status
         return result
 
-    async def _run_health_check_cycle(self) -> dict[str, Any]:
+    async def _run_health_check_cycle(self, *, cycle_run_id: int | None = None) -> dict[str, Any]:
         started_at = time.monotonic()
         platforms = list(self.config.platforms)
         items: list[dict[str, Any]] = []
 
         for platform in platforms:
+            item_started = time.monotonic()
             try:
                 summary = await probe_pool_health(
                     platform=platform,  # type: ignore[arg-type]
@@ -101,6 +244,7 @@ class CrawlScheduler:
                     {
                         "platform": platform,
                         "success": True,
+                        "duration_ms": int((time.monotonic() - item_started) * 1000),
                         "summary": summary,
                     }
                 )
@@ -109,8 +253,22 @@ class CrawlScheduler:
                     {
                         "platform": platform,
                         "success": False,
+                        "duration_ms": int((time.monotonic() - item_started) * 1000),
                         "error": str(exc),
                     }
+                )
+
+            if cycle_run_id is not None and cycle_run_id > 0:
+                current = items[-1]
+                add_scheduler_cycle_run_item(
+                    cycle_run_id=cycle_run_id,
+                    task_type="health_check",
+                    platform=platform,
+                    success=bool(current.get("success")),
+                    duration_ms=current.get("duration_ms"),
+                    error=current.get("error"),
+                    details=current.get("summary") if current.get("success") else {},
+                    db_path=self.config.db_path,
                 )
 
         total_ms = int((time.monotonic() - started_at) * 1000)
@@ -122,7 +280,7 @@ class CrawlScheduler:
             "failed_count": sum(1 for x in items if not x.get("success")),
         }
 
-    async def _run_crawl_cycle(self) -> dict[str, Any]:
+    async def _run_crawl_cycle(self, *, cycle_run_id: int | None = None) -> dict[str, Any]:
         started_at = time.monotonic()
         creators = list_creators(db_path=self.config.db_path, enabled_only=True)
         platform_set = set(self.config.platforms)
@@ -144,6 +302,7 @@ class CrawlScheduler:
         async def run_creator(item: dict[str, Any]) -> dict[str, Any]:
             platform = str(item.get("platform") or "")
             creator_id = str(item.get("creator_id") or "")
+            creator_url = str(item.get("creator_url") or "")
             semaphore = semaphores.get(platform, default_sem)
             item_started = time.monotonic()
             async with semaphore:
@@ -163,6 +322,7 @@ class CrawlScheduler:
                     return {
                         "platform": platform,
                         "creator_id": creator_id,
+                        "creator_url": creator_url,
                         "success": True,
                         "run_id": (
                             result.get("storage", {}).get("run_id")
@@ -175,6 +335,7 @@ class CrawlScheduler:
                     return {
                         "platform": platform,
                         "creator_id": creator_id,
+                        "creator_url": creator_url,
                         "success": False,
                         "error": str(exc),
                         "duration_ms": int((time.monotonic() - item_started) * 1000),
@@ -182,6 +343,20 @@ class CrawlScheduler:
 
         tasks = [run_creator(item) for item in creators]
         items = await asyncio.gather(*tasks) if tasks else []
+        if cycle_run_id is not None and cycle_run_id > 0:
+            for entry in items:
+                add_scheduler_cycle_run_item(
+                    cycle_run_id=cycle_run_id,
+                    task_type="crawl_creator",
+                    platform=entry.get("platform"),
+                    creator_id=entry.get("creator_id"),
+                    creator_url=entry.get("creator_url"),
+                    success=bool(entry.get("success")),
+                    duration_ms=entry.get("duration_ms"),
+                    error=entry.get("error"),
+                    details={"run_id": entry.get("run_id")},
+                    db_path=self.config.db_path,
+                )
         duration_ms = int((time.monotonic() - started_at) * 1000)
 
         platform_summary: dict[str, dict[str, int]] = {}
@@ -202,6 +377,47 @@ class CrawlScheduler:
             "failed_count": sum(1 for item in items if not item.get("success")),
             "duration_ms": duration_ms,
         }
+
+    async def _send_webhook_alert_if_needed(
+        self,
+        *,
+        cycle_status: str,
+        cycle_run_id: int,
+        result: dict[str, Any],
+        cycle_error: str | None = None,
+    ) -> tuple[bool, str | None]:
+        webhook_url = (self.config.webhook_alert_url or "").strip()
+        if not webhook_url:
+            return (False, None)
+        has_failures = _cycle_has_failures(result=result, cycle_error=cycle_error)
+        if not self.config.webhook_alert_on_success and not has_failures:
+            return (False, None)
+        payload = {
+            "event": "scheduler_cycle",
+            "scheduler_name": self.config.scheduler_name,
+            "cycle_run_id": cycle_run_id,
+            "status": cycle_status,
+            "run_time_utc": result.get("run_time_utc"),
+            "lock_key": self.config.lock_key,
+            "lock_owner_id": self.lock_owner_id,
+            "force_crawl": bool(result.get("force_crawl")),
+            "force_health_check": bool(result.get("force_health_check")),
+            "crawl_due": bool(result.get("crawl_due")),
+            "health_due": bool(result.get("health_due")),
+            "crawl_result": result.get("crawl_result"),
+            "health_result": result.get("health_result"),
+            "error": cycle_error,
+        }
+        try:
+            await asyncio.to_thread(
+                _post_json_webhook,
+                webhook_url,
+                payload,
+                self.config.webhook_timeout_seconds,
+            )
+            return (True, None)
+        except Exception as exc:  # noqa: BLE001
+            return (False, str(exc))
 
 
 def get_scheduler_runtime_state(
@@ -276,6 +492,48 @@ def run_scheduler_daemon_sync(
             max_ticks=max_ticks,
         )
     )
+
+
+def _extract_cycle_counts(result: Any) -> tuple[int, int]:
+    if not isinstance(result, dict):
+        return (0, 0)
+    success_count = int(result.get("success_count") or 0)
+    failed_count = int(result.get("failed_count") or 0)
+    return (max(0, success_count), max(0, failed_count))
+
+
+def _cycle_has_failures(*, result: dict[str, Any], cycle_error: str | None = None) -> bool:
+    if cycle_error:
+        return True
+    _, crawl_failed = _extract_cycle_counts(result.get("crawl_result"))
+    _, health_failed = _extract_cycle_counts(result.get("health_result"))
+    return (crawl_failed + health_failed) > 0
+
+
+def _post_json_webhook(url: str, payload: dict[str, Any], timeout_seconds: int) -> None:
+    request = urllib.request.Request(
+        url=url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    effective_timeout = max(1, int(timeout_seconds))
+    try:
+        with urllib.request.urlopen(request, timeout=effective_timeout) as response:
+            status_code = int(getattr(response, "status", 0) or 0)
+            if status_code < 200 or status_code >= 300:
+                raise RuntimeError(f"webhook responded with status={status_code}")
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"webhook http error: {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"webhook url error: {exc.reason}") from exc
+
+
+def _default_lock_owner_id() -> str:
+    host = socket.gethostname() or "unknown-host"
+    pid = os.getpid()
+    token = uuid.uuid4().hex[:8]
+    return f"{host}:{pid}:{token}"
 
 
 def _is_due(last_time: datetime | None, interval_minutes: int, now: datetime) -> bool:

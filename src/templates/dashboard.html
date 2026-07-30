@@ -435,6 +435,82 @@
       </table>
     </div>
 
+    <div class="card" style="margin-bottom:16px;">
+      <h2>调度周期日志（最近20条）</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>cycle_run_id</th>
+            <th>状态</th>
+            <th>到期判定</th>
+            <th>抓取成功/失败</th>
+            <th>健康成功/失败</th>
+            <th>告警</th>
+            <th>开始/结束</th>
+            <th>耗时(ms)</th>
+            <th>错误</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for cycle in scheduler_cycles %}
+          <tr>
+            <td><code>{{ cycle.id }}</code></td>
+            <td>{{ cycle.status }}</td>
+            <td>
+              crawl={{ 1 if cycle.crawl_due else 0 }} /
+              health={{ 1 if cycle.health_due else 0 }}
+            </td>
+            <td>{{ cycle.crawl_success_count }} / {{ cycle.crawl_failed_count }}</td>
+            <td>{{ cycle.health_success_count }} / {{ cycle.health_failed_count }}</td>
+            <td>{{ "sent" if cycle.alert_sent else "-" }}</td>
+            <td>
+              <div class="small">{{ cycle.started_at_utc }}</div>
+              <div class="small">{{ cycle.ended_at_utc or "-" }}</div>
+            </td>
+            <td>{{ cycle.duration_ms or "-" }}</td>
+            <td class="small">{{ cycle.error or cycle.alert_error or "-" }}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="9">暂无调度周期日志</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <h2>调度任务明细（最新周期 {{ latest_cycle_id or "-" }}）</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>item_id</th>
+            <th>task_type</th>
+            <th>平台</th>
+            <th>博主ID</th>
+            <th>结果</th>
+            <th>耗时(ms)</th>
+            <th>错误</th>
+            <th>时间</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in scheduler_cycle_items %}
+          <tr>
+            <td><code>{{ item.id }}</code></td>
+            <td>{{ item.task_type }}</td>
+            <td>{{ item.platform or "-" }}</td>
+            <td><code>{{ item.creator_id or "-" }}</code></td>
+            <td>{{ "ok" if item.success else "fail" }}</td>
+            <td>{{ item.duration_ms or "-" }}</td>
+            <td class="small">{{ item.error or "-" }}</td>
+            <td>{{ item.created_at_utc }}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="8">暂无任务明细</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
     <div class="card">
       <h2>最近抓取记录</h2>
       <table>
