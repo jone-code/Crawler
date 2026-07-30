@@ -327,6 +327,11 @@
     <div class="card" style="margin-bottom:16px;">
       <h2>健康视图筛选</h2>
       <form method="get" action="/">
+        <input type="hidden" name="scheduler_status" value="{{ scheduler_filter_status }}" />
+        <input type="hidden" name="scheduler_limit" value="{{ scheduler_filter_limit }}" />
+        {% if selected_cycle_id %}
+        <input type="hidden" name="selected_cycle_id" value="{{ selected_cycle_id }}" />
+        {% endif %}
         <div class="grid" style="margin-bottom:0;">
           <div>
             <label>平台</label>
@@ -436,7 +441,42 @@
     </div>
 
     <div class="card" style="margin-bottom:16px;">
-      <h2>调度周期日志（最近20条）</h2>
+      <h2>调度日志筛选</h2>
+      <form method="get" action="/">
+        <input type="hidden" name="health_platform" value="{{ health_filter_platform }}" />
+        <input type="hidden" name="health_resource_type" value="{{ health_filter_resource_type }}" />
+        <input type="hidden" name="health_window_hours" value="{{ health_filter_window_hours }}" />
+        {% if health_filter_only_abnormal %}
+        <input type="hidden" name="only_abnormal" value="1" />
+        {% endif %}
+        <div class="grid" style="margin-bottom:0;">
+          <div>
+            <label>调度状态</label>
+            <select name="scheduler_status">
+              <option value="all" {% if scheduler_filter_status == "all" %}selected{% endif %}>all</option>
+              <option value="running" {% if scheduler_filter_status == "running" %}selected{% endif %}>running</option>
+              <option value="success" {% if scheduler_filter_status == "success" %}selected{% endif %}>success</option>
+              <option value="partial_failed" {% if scheduler_filter_status == "partial_failed" %}selected{% endif %}>partial_failed</option>
+              <option value="no_due" {% if scheduler_filter_status == "no_due" %}selected{% endif %}>no_due</option>
+              <option value="failed" {% if scheduler_filter_status == "failed" %}selected{% endif %}>failed</option>
+            </select>
+          </div>
+          <div>
+            <label>展示条数</label>
+            <select name="scheduler_limit">
+              <option value="20" {% if scheduler_filter_limit == 20 %}selected{% endif %}>20</option>
+              <option value="50" {% if scheduler_filter_limit == 50 %}selected{% endif %}>50</option>
+              <option value="100" {% if scheduler_filter_limit == 100 %}selected{% endif %}>100</option>
+            </select>
+          </div>
+        </div>
+        <button type="submit">应用筛选</button>
+        <a class="small" href="/" style="margin-left:10px;">重置筛选</a>
+      </form>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <h2>调度周期日志（最近 {{ scheduler_filter_limit }} 条）</h2>
       <table>
         <thead>
           <tr>
@@ -454,7 +494,11 @@
         <tbody>
           {% for cycle in scheduler_cycles %}
           <tr>
-            <td><code>{{ cycle.id }}</code></td>
+            <td>
+              <a href="/?scheduler_status={{ scheduler_filter_status }}&scheduler_limit={{ scheduler_filter_limit }}&selected_cycle_id={{ cycle.id }}&health_platform={{ health_filter_platform }}&health_resource_type={{ health_filter_resource_type }}&health_window_hours={{ health_filter_window_hours }}{% if health_filter_only_abnormal %}&only_abnormal=1{% endif %}">
+                <code>{{ cycle.id }}</code>
+              </a>
+            </td>
             <td>{{ cycle.status }}</td>
             <td>
               crawl={{ 1 if cycle.crawl_due else 0 }} /
@@ -478,7 +522,7 @@
     </div>
 
     <div class="card" style="margin-bottom:16px;">
-      <h2>调度任务明细（最新周期 {{ latest_cycle_id or "-" }}）</h2>
+      <h2>调度任务明细（当前周期 {{ selected_cycle_id or "-" }}，最新 {{ latest_cycle_id or "-" }}）</h2>
       <table>
         <thead>
           <tr>

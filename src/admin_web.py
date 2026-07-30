@@ -61,6 +61,18 @@ def create_app(db_path: str | None = None) -> Flask:
             parsed_window = 24
         health_window_hours = parsed_window if parsed_window in {24, 72, 168} else 24
         only_abnormal = (request.args.get("only_abnormal") or "").strip() == "1"
+        scheduler_status_raw = (request.args.get("scheduler_status") or "").strip().lower()
+        scheduler_status = (
+            scheduler_status_raw
+            if scheduler_status_raw in {"running", "success", "partial_failed", "no_due", "failed"}
+            else None
+        )
+        scheduler_limit_raw = (request.args.get("scheduler_limit") or "20").strip()
+        try:
+            scheduler_limit_parsed = int(scheduler_limit_raw)
+        except ValueError:
+            scheduler_limit_parsed = 20
+        scheduler_limit = scheduler_limit_parsed if scheduler_limit_parsed in {20, 50, 100} else 20
 
         creators = list_creator_ids(db_path=app.config["DB_PATH"], enabled_only=False)
         accounts = list_crawl_account_pool(db_path=app.config["DB_PATH"], enabled_only=False)
@@ -83,16 +95,24 @@ def create_app(db_path: str | None = None) -> Flask:
         )
         scheduler_cycles = list_scheduler_cycle_runs(
             db_path=app.config["DB_PATH"],
-            limit=20,
+            limit=scheduler_limit,
+            status=scheduler_status,
         )
+        selected_cycle_id_raw = (request.args.get("selected_cycle_id") or "").strip()
+        try:
+            selected_cycle_id = int(selected_cycle_id_raw) if selected_cycle_id_raw else None
+        except ValueError:
+            selected_cycle_id = None
         latest_cycle_id = (
             int(scheduler_cycles[0]["id"])
             if scheduler_cycles and isinstance(scheduler_cycles[0], dict)
             else None
         )
+        if selected_cycle_id is None:
+            selected_cycle_id = latest_cycle_id
         scheduler_cycle_items = list_scheduler_cycle_run_items(
             db_path=app.config["DB_PATH"],
-            cycle_run_id=latest_cycle_id,
+            cycle_run_id=selected_cycle_id,
             limit=100,
         )
         recent_runs = _list_recent_runs(app.config["DB_PATH"], limit=50)
@@ -108,9 +128,12 @@ def create_app(db_path: str | None = None) -> Flask:
             health_filter_resource_type=health_resource_type_raw or "all",
             health_filter_window_hours=health_window_hours,
             health_filter_only_abnormal=only_abnormal,
+            scheduler_filter_status=scheduler_status_raw or "all",
+            scheduler_filter_limit=scheduler_limit,
             scheduler_cycles=scheduler_cycles,
             scheduler_cycle_items=scheduler_cycle_items,
             latest_cycle_id=latest_cycle_id,
+            selected_cycle_id=selected_cycle_id,
             recent_runs=recent_runs,
             default_db_path=app.config["DB_PATH"],
         )

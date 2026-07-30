@@ -1522,38 +1522,42 @@ def list_scheduler_cycle_runs(
     *,
     db_path: str = DEFAULT_DB_PATH,
     limit: int = 100,
+    status: str | None = None,
 ) -> list[dict[str, Any]]:
     init_sqlite_db(db_path=db_path)
+    query = """
+        SELECT
+            id,
+            scheduler_name,
+            lock_key,
+            lock_owner_id,
+            status,
+            force_crawl,
+            force_health_check,
+            crawl_due,
+            health_due,
+            crawl_success_count,
+            crawl_failed_count,
+            health_success_count,
+            health_failed_count,
+            alert_sent,
+            alert_error,
+            error,
+            metadata_json,
+            started_at_utc,
+            ended_at_utc,
+            duration_ms
+        FROM scheduler_cycle_runs
+    """
+    params: list[Any] = []
+    if isinstance(status, str) and status.strip():
+        query += " WHERE status = ?"
+        params.append(status.strip())
+    query += " ORDER BY id DESC LIMIT ?"
+    params.append(max(1, int(limit)))
+
     with sqlite3.connect(db_path) as conn:
-        rows = conn.execute(
-            """
-            SELECT
-                id,
-                scheduler_name,
-                lock_key,
-                lock_owner_id,
-                status,
-                force_crawl,
-                force_health_check,
-                crawl_due,
-                health_due,
-                crawl_success_count,
-                crawl_failed_count,
-                health_success_count,
-                health_failed_count,
-                alert_sent,
-                alert_error,
-                error,
-                metadata_json,
-                started_at_utc,
-                ended_at_utc,
-                duration_ms
-            FROM scheduler_cycle_runs
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (max(1, int(limit)),),
-        ).fetchall()
+        rows = conn.execute(query, params).fetchall()
     return [
         {
             "id": row[0],
