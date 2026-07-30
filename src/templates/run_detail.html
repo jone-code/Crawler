@@ -30,6 +30,11 @@
       <p><strong>主页:</strong> <a href="{{ run.creator_url }}" target="_blank">{{ run.creator_url }}</a></p>
       <p><strong>crawl_time_utc:</strong> {{ run.crawl_time_utc }}</p>
       <p><strong>posts:</strong> {{ run.post_count }} | <strong>media:</strong> {{ run.media_count }}</p>
+      <p>
+        <strong>导出:</strong>
+        <a href="/runs/{{ run.id }}/export.json">下载 JSON</a> |
+        <a href="/runs/{{ run.id }}/export.csv">下载 CSV</a>
+      </p>
     </div>
 
     <div class="card">

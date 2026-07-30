@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import csv
 import json
+import io
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, flash, redirect, render_template, request, url_for
+from flask import Flask, Response, flash, redirect, render_template, request, url_for
 
 from .scheduler import (
     SchedulerConfig,
@@ -515,6 +518,91 @@ def create_app(db_path: str | None = None) -> Flask:
             post_samples=post_samples,
         )
 
+    @app.get("/runs/<int:run_id>/export.json")
+    def run_export_json(run_id: int):
+        run = _get_run(app.config["DB_PATH"], run_id)
+        if run is None:
+            flash(f"run_id={run_id} 不存在", "error")
+            return redirect(url_for("dashboard"))
+        payload = {
+            "exported_at_utc": datetime.now(timezone.utc).isoformat(),
+            "run": run,
+            "diff_items": _list_diff_items(app.config["DB_PATH"], run_id),
+            "posts": _list_run_posts_full(app.config["DB_PATH"], run_id),
+            "media_items": _list_run_media(app.config["DB_PATH"], run_id),
+        }
+        body = json.dumps(payload, ensure_ascii=False, indent=2)
+        filename = _build_run_export_filename(run, suffix="full", extension="json")
+        return Response(
+            body,
+            mimetype="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    @app.get("/runs/<int:run_id>/export.csv")
+    def run_export_csv(run_id: int):
+        run = _get_run(app.config["DB_PATH"], run_id)
+        if run is None:
+            flash(f"run_id={run_id} 不存在", "error")
+            return redirect(url_for("dashboard"))
+        diff_items = _list_diff_items(app.config["DB_PATH"], run_id)
+        diff_map: dict[str, str] = {}
+        for item in diff_items:
+            if not isinstance(item, dict):
+                continue
+            post_url = item.get("post_url")
+            if not isinstance(post_url, str) or not post_url:
+                continue
+            if post_url in diff_map:
+                continue
+            diff_map[post_url] = str(item.get("change_type") or "")
+
+        posts = _list_run_posts_full(app.config["DB_PATH"], run_id)
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(
+            [
+                "run_id",
+                "platform",
+                "creator_url",
+                "post_id",
+                "post_url",
+                "title",
+                "description",
+                "cover_url",
+                "like_count",
+                "comment_count",
+                "share_count",
+                "publish_time",
+                "change_type",
+            ]
+        )
+        for post in posts:
+            post_url = str(post.get("post_url") or "")
+            writer.writerow(
+                [
+                    run.get("id"),
+                    run.get("platform"),
+                    run.get("creator_url"),
+                    post.get("post_id"),
+                    post_url,
+                    post.get("title"),
+                    post.get("description"),
+                    post.get("cover_url"),
+                    post.get("like_count"),
+                    post.get("comment_count"),
+                    post.get("share_count"),
+                    post.get("publish_time"),
+                    diff_map.get(post_url, ""),
+                ]
+            )
+        filename = _build_run_export_filename(run, suffix="posts", extension="csv")
+        return Response(
+            output.getvalue(),
+            mimetype="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
     return app
 
 
@@ -634,6 +722,51 @@ def _list_run_posts(db_path: str, run_id: int, limit: int = 100) -> list[dict[st
     return [dict(row) for row in rows]
 
 
+def _list_run_posts_full(db_path: str, run_id: int) -> list[dict[str, Any]]:
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                post_id,
+                post_url,
+                title,
+                description,
+                cover_url,
+                like_count,
+                comment_count,
+                share_count,
+                publish_time
+            FROM posts
+            WHERE run_id = ?
+            ORDER BY id ASC
+            """,
+            (run_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _list_run_media(db_path: str, run_id: int) -> list[dict[str, Any]]:
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                post_id,
+                post_url,
+                media_type,
+                media_url,
+                local_path,
+                download_status,
+                file_size,
+                error
+            FROM post_media
+            WHERE run_id = ?
+            ORDER BY id ASC
+            """,
+            (run_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def _get_media_stats(db_path: str, run_id: int) -> list[dict[str, Any]]:
     with _connect(db_path) as conn:
         rows = conn.execute(
@@ -649,6 +782,36 @@ def _get_media_stats(db_path: str, run_id: int) -> list[dict[str, Any]]:
             (run_id,),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def _build_run_export_filename(
+    run: dict[str, Any],
+    *,
+    suffix: str,
+    extension: str,
+) -> str:
+    run_id = int(run.get("id") or 0)
+    platform = _safe_file_fragment(run.get("platform"))
+    creator_name = _safe_file_fragment(run.get("creator_name"))
+    if creator_name == "unknown":
+        creator_name = _safe_file_fragment(run.get("creator_url"))
+    return f"run-{run_id}-{platform}-{creator_name}-{suffix}.{extension}"
+
+
+def _safe_file_fragment(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return "unknown"
+    output_chars: list[str] = []
+    for ch in text:
+        if ("a" <= ch <= "z") or ("0" <= ch <= "9"):
+            output_chars.append(ch)
+        elif ch in {"-", "_", "."}:
+            output_chars.append(ch)
+        else:
+            output_chars.append("-")
+    compact = "".join(output_chars).strip("-")
+    return compact[:48] if compact else "unknown"
 
 
 def main() -> None:

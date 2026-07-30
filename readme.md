@@ -15,6 +15,7 @@ This project crawls creator post lists from:
 - Backend creator-id registry (add/list creators)
 - Optional media downloading (images/videos)
 - Built-in admin web page (creator management + crawl runs + diff view)
+- Run-detail export (JSON/CSV) for offline analysis
 - Account pool + proxy pool rotation for anti-bot resilience
 - P0 resilience scheduler: cooldown circuit-breaker + weighted scoring
 - Active pool health check API/admin action for account/proxy probing
@@ -56,6 +57,7 @@ Then open `http://127.0.0.1:8000` to:
 - trigger crawl jobs
 - inspect per-run diff summary (`new/updated/missing`)
 - inspect media download status
+- export run detail as JSON/CSV from run detail page
 
 ### Synchronous Call
 
