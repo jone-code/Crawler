@@ -34,6 +34,14 @@
   <body>
     <h1>Crawler Admin</h1>
     <p class="muted">数据库: <code>{{ default_db_path }}</code></p>
+    {% if auth_enabled %}
+    <p class="muted">
+      当前登录: <code>{{ current_admin_user }}</code>
+      <form method="post" action="/logout" class="inline-form" style="margin-left:8px;">
+        <button class="secondary" type="submit">退出登录</button>
+      </form>
+    </p>
+    {% endif %}
 
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages %}
@@ -327,6 +335,11 @@
     <div class="card" style="margin-bottom:16px;">
       <h2>健康视图筛选</h2>
       <form method="get" action="/">
+        <input type="hidden" name="scheduler_status" value="{{ scheduler_filter_status }}" />
+        <input type="hidden" name="scheduler_limit" value="{{ scheduler_filter_limit }}" />
+        {% if selected_cycle_id %}
+        <input type="hidden" name="selected_cycle_id" value="{{ selected_cycle_id }}" />
+        {% endif %}
         <div class="grid" style="margin-bottom:0;">
           <div>
             <label>平台</label>
@@ -430,6 +443,171 @@
           </tr>
           {% else %}
           <tr><td colspan="10">暂无检查明细</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <h2>调度日志筛选</h2>
+      <form method="get" action="/">
+        <input type="hidden" name="health_platform" value="{{ health_filter_platform }}" />
+        <input type="hidden" name="health_resource_type" value="{{ health_filter_resource_type }}" />
+        <input type="hidden" name="health_window_hours" value="{{ health_filter_window_hours }}" />
+        {% if health_filter_only_abnormal %}
+        <input type="hidden" name="only_abnormal" value="1" />
+        {% endif %}
+        <div class="grid" style="margin-bottom:0;">
+          <div>
+            <label>调度状态</label>
+            <select name="scheduler_status">
+              <option value="all" {% if scheduler_filter_status == "all" %}selected{% endif %}>all</option>
+              <option value="running" {% if scheduler_filter_status == "running" %}selected{% endif %}>running</option>
+              <option value="success" {% if scheduler_filter_status == "success" %}selected{% endif %}>success</option>
+              <option value="partial_failed" {% if scheduler_filter_status == "partial_failed" %}selected{% endif %}>partial_failed</option>
+              <option value="no_due" {% if scheduler_filter_status == "no_due" %}selected{% endif %}>no_due</option>
+              <option value="failed" {% if scheduler_filter_status == "failed" %}selected{% endif %}>failed</option>
+            </select>
+          </div>
+          <div>
+            <label>展示条数</label>
+            <select name="scheduler_limit">
+              <option value="20" {% if scheduler_filter_limit == 20 %}selected{% endif %}>20</option>
+              <option value="50" {% if scheduler_filter_limit == 50 %}selected{% endif %}>50</option>
+              <option value="100" {% if scheduler_filter_limit == 100 %}selected{% endif %}>100</option>
+            </select>
+          </div>
+        </div>
+        <button type="submit">应用筛选</button>
+        <a class="small" href="/" style="margin-left:10px;">重置筛选</a>
+      </form>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <h2>调度周期日志（最近 {{ scheduler_filter_limit }} 条）</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>cycle_run_id</th>
+            <th>状态</th>
+            <th>到期判定</th>
+            <th>抓取成功/失败</th>
+            <th>健康成功/失败</th>
+            <th>告警</th>
+            <th>开始/结束</th>
+            <th>耗时(ms)</th>
+            <th>错误</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for cycle in scheduler_cycles %}
+          <tr>
+            <td>
+              <a href="/?scheduler_status={{ scheduler_filter_status }}&scheduler_limit={{ scheduler_filter_limit }}&selected_cycle_id={{ cycle.id }}&health_platform={{ health_filter_platform }}&health_resource_type={{ health_filter_resource_type }}&health_window_hours={{ health_filter_window_hours }}{% if health_filter_only_abnormal %}&only_abnormal=1{% endif %}">
+                <code>{{ cycle.id }}</code>
+              </a>
+            </td>
+            <td>{{ cycle.status }}</td>
+            <td>
+              crawl={{ 1 if cycle.crawl_due else 0 }} /
+              health={{ 1 if cycle.health_due else 0 }}
+            </td>
+            <td>{{ cycle.crawl_success_count }} / {{ cycle.crawl_failed_count }}</td>
+            <td>{{ cycle.health_success_count }} / {{ cycle.health_failed_count }}</td>
+            <td>{{ "sent" if cycle.alert_sent else "-" }}</td>
+            <td>
+              <div class="small">{{ cycle.started_at_utc }}</div>
+              <div class="small">{{ cycle.ended_at_utc or "-" }}</div>
+            </td>
+            <td>{{ cycle.duration_ms or "-" }}</td>
+            <td class="small">{{ cycle.error or cycle.alert_error or "-" }}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="9">暂无调度周期日志</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <h2>调度任务明细（当前周期 {{ selected_cycle_id or "-" }}，最新 {{ latest_cycle_id or "-" }}）</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>item_id</th>
+            <th>task_type</th>
+            <th>平台</th>
+            <th>博主ID</th>
+            <th>结果</th>
+            <th>耗时(ms)</th>
+            <th>错误</th>
+            <th>时间</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in scheduler_cycle_items %}
+          <tr>
+            <td><code>{{ item.id }}</code></td>
+            <td>{{ item.task_type }}</td>
+            <td>{{ item.platform or "-" }}</td>
+            <td><code>{{ item.creator_id or "-" }}</code></td>
+            <td>{{ "ok" if item.success else "fail" }}</td>
+            <td>{{ item.duration_ms or "-" }}</td>
+            <td class="small">{{ item.error or "-" }}</td>
+            <td>{{ item.created_at_utc }}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="8">暂无任务明细</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <h2>失败任务重试</h2>
+      <p class="muted">
+        当前周期失败抓取任务数: <code>{{ failed_scheduler_items | length }}</code>
+      </p>
+      <form method="post" action="/scheduler/retry-failed">
+        <input type="hidden" name="cycle_run_id" value="{{ selected_cycle_id or '' }}" />
+        <label>重试任务上限（1-50）</label>
+        <input type="number" name="max_retry_items" value="10" min="1" max="50" />
+        <label>每次抓取 max_items（0=持续下探）</label>
+        <input type="number" name="max_items" value="20" min="0" />
+        <label><input type="checkbox" name="headless" checked style="width:auto;" /> Headless</label>
+        <label><input type="checkbox" name="use_checkpoint" checked style="width:auto;" /> 使用 checkpoint</label>
+        <label><input type="checkbox" name="use_account_pool" checked style="width:auto;" /> 使用账号池</label>
+        <label><input type="checkbox" name="use_proxy_pool" checked style="width:auto;" /> 使用代理池</label>
+        <label><input type="checkbox" name="download_media" style="width:auto;" /> 下载媒体</label>
+        <button type="submit">重试当前周期失败任务</button>
+      </form>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <h2>操作审计日志（最近100条）</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>时间</th>
+            <th>操作者</th>
+            <th>动作</th>
+            <th>结果</th>
+            <th>目标</th>
+            <th>详情</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for log in admin_action_logs %}
+          <tr>
+            <td>{{ log.created_at_utc }}</td>
+            <td><code>{{ log.actor }}</code></td>
+            <td>{{ log.action }}</td>
+            <td>{{ "ok" if log.success else "fail" }}</td>
+            <td>{{ log.target_type or "-" }} / <code>{{ log.target_id or "-" }}</code></td>
+            <td class="small"><code>{{ log.details | tojson }}</code></td>
+          </tr>
+          {% else %}
+          <tr><td colspan="6">暂无操作日志</td></tr>
           {% endfor %}
         </tbody>
       </table>

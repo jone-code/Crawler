@@ -206,6 +206,78 @@ def init_sqlite_db(db_path: str = DEFAULT_DB_PATH) -> None:
                 value_json TEXT NOT NULL,
                 updated_at_utc TEXT NOT NULL DEFAULT (datetime('now'))
             );
+
+            CREATE TABLE IF NOT EXISTS scheduler_locks (
+                lock_key TEXT PRIMARY KEY,
+                owner_id TEXT NOT NULL,
+                lease_until_utc TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at_utc TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at_utc TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS scheduler_cycle_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scheduler_name TEXT NOT NULL,
+                lock_key TEXT NOT NULL,
+                lock_owner_id TEXT,
+                status TEXT NOT NULL,
+                force_crawl INTEGER NOT NULL DEFAULT 0,
+                force_health_check INTEGER NOT NULL DEFAULT 0,
+                crawl_due INTEGER NOT NULL DEFAULT 0,
+                health_due INTEGER NOT NULL DEFAULT 0,
+                crawl_success_count INTEGER NOT NULL DEFAULT 0,
+                crawl_failed_count INTEGER NOT NULL DEFAULT 0,
+                health_success_count INTEGER NOT NULL DEFAULT 0,
+                health_failed_count INTEGER NOT NULL DEFAULT 0,
+                alert_sent INTEGER NOT NULL DEFAULT 0,
+                alert_error TEXT,
+                error TEXT,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                started_at_utc TEXT NOT NULL DEFAULT (datetime('now')),
+                ended_at_utc TEXT,
+                duration_ms INTEGER
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_scheduler_cycle_runs_recent
+              ON scheduler_cycle_runs(started_at_utc DESC, id DESC);
+
+            CREATE TABLE IF NOT EXISTS scheduler_cycle_run_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cycle_run_id INTEGER NOT NULL,
+                task_type TEXT NOT NULL,
+                platform TEXT,
+                creator_id TEXT,
+                creator_url TEXT,
+                success INTEGER NOT NULL,
+                duration_ms INTEGER,
+                error TEXT,
+                details_json TEXT NOT NULL DEFAULT '{}',
+                created_at_utc TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (cycle_run_id) REFERENCES scheduler_cycle_runs(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_scheduler_cycle_run_items_run
+              ON scheduler_cycle_run_items(cycle_run_id, id ASC);
+
+            CREATE TABLE IF NOT EXISTS admin_action_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                actor TEXT NOT NULL,
+                action TEXT NOT NULL,
+                success INTEGER NOT NULL,
+                target_type TEXT,
+                target_id TEXT,
+                details_json TEXT NOT NULL DEFAULT '{}',
+                remote_addr TEXT,
+                user_agent TEXT,
+                created_at_utc TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_admin_action_logs_recent
+              ON admin_action_logs(id DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_admin_action_logs_action_time
+              ON admin_action_logs(action, created_at_utc DESC);
             """
         )
         _run_schema_migrations(conn)
@@ -227,6 +299,7 @@ def _run_schema_migrations(conn: sqlite3.Connection) -> None:
         {
             "consecutive_failures": "INTEGER NOT NULL DEFAULT 0",
             "cooldown_until_utc": "TEXT",
+            "last_latency_ms": "INTEGER",
         },
     )
 
@@ -1180,6 +1253,505 @@ def upsert_scheduler_state(
         conn.commit()
 
 
+def acquire_scheduler_lock(
+    *,
+    lock_key: str,
+    owner_id: str,
+    lease_seconds: int = 120,
+    metadata: dict[str, Any] | None = None,
+    db_path: str = DEFAULT_DB_PATH,
+) -> dict[str, Any]:
+    if not lock_key.strip():
+        raise ValueError("lock_key cannot be empty")
+    if not owner_id.strip():
+        raise ValueError("owner_id cannot be empty")
+    init_sqlite_db(db_path=db_path)
+    effective_lease = max(5, int(lease_seconds))
+    now = datetime.now(timezone.utc)
+    lease_until = (now + timedelta(seconds=effective_lease)).isoformat()
+    metadata_payload = metadata or {}
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            """
+            SELECT
+                lock_key,
+                owner_id,
+                lease_until_utc,
+                metadata_json,
+                created_at_utc,
+                updated_at_utc
+            FROM scheduler_locks
+            WHERE lock_key = ?
+            """,
+            (lock_key.strip(),),
+        ).fetchone()
+
+        if row is None:
+            conn.execute(
+                """
+                INSERT INTO scheduler_locks (
+                    lock_key,
+                    owner_id,
+                    lease_until_utc,
+                    metadata_json
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    lock_key.strip(),
+                    owner_id.strip(),
+                    lease_until,
+                    json.dumps(metadata_payload, ensure_ascii=False),
+                ),
+            )
+            conn.commit()
+            return {
+                "acquired": True,
+                "lock_key": lock_key.strip(),
+                "owner_id": owner_id.strip(),
+                "lease_until_utc": lease_until,
+                "replaced_expired_lock": False,
+                "previous_owner_id": None,
+            }
+
+        current_owner = str(row[1] or "")
+        current_lease = _parse_iso_datetime(row[2])
+        expired = current_lease is None or current_lease <= now
+        owner_matched = current_owner == owner_id.strip()
+        if owner_matched or expired:
+            conn.execute(
+                """
+                UPDATE scheduler_locks
+                SET
+                    owner_id = ?,
+                    lease_until_utc = ?,
+                    metadata_json = ?,
+                    updated_at_utc = datetime('now')
+                WHERE lock_key = ?
+                """,
+                (
+                    owner_id.strip(),
+                    lease_until,
+                    json.dumps(metadata_payload, ensure_ascii=False),
+                    lock_key.strip(),
+                ),
+            )
+            conn.commit()
+            return {
+                "acquired": True,
+                "lock_key": lock_key.strip(),
+                "owner_id": owner_id.strip(),
+                "lease_until_utc": lease_until,
+                "replaced_expired_lock": bool(expired and not owner_matched),
+                "previous_owner_id": current_owner or None,
+            }
+
+        return {
+            "acquired": False,
+            "lock_key": lock_key.strip(),
+            "owner_id": current_owner,
+            "lease_until_utc": row[2],
+            "metadata": _safe_json_object(row[3]),
+        }
+
+
+def release_scheduler_lock(
+    *,
+    lock_key: str,
+    owner_id: str,
+    db_path: str = DEFAULT_DB_PATH,
+) -> bool:
+    if not lock_key.strip():
+        raise ValueError("lock_key cannot be empty")
+    if not owner_id.strip():
+        raise ValueError("owner_id cannot be empty")
+    init_sqlite_db(db_path=db_path)
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.execute(
+            """
+            DELETE FROM scheduler_locks
+            WHERE lock_key = ? AND owner_id = ?
+            """,
+            (lock_key.strip(), owner_id.strip()),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def create_scheduler_cycle_run(
+    *,
+    scheduler_name: str,
+    lock_key: str,
+    lock_owner_id: str | None,
+    status: str,
+    force_crawl: bool = False,
+    force_health_check: bool = False,
+    crawl_due: bool = False,
+    health_due: bool = False,
+    metadata: dict[str, Any] | None = None,
+    db_path: str = DEFAULT_DB_PATH,
+) -> int:
+    if not scheduler_name.strip():
+        raise ValueError("scheduler_name cannot be empty")
+    if not lock_key.strip():
+        raise ValueError("lock_key cannot be empty")
+    if not status.strip():
+        raise ValueError("status cannot be empty")
+    init_sqlite_db(db_path=db_path)
+    metadata_payload = metadata or {}
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO scheduler_cycle_runs (
+                scheduler_name,
+                lock_key,
+                lock_owner_id,
+                status,
+                force_crawl,
+                force_health_check,
+                crawl_due,
+                health_due,
+                metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                scheduler_name.strip(),
+                lock_key.strip(),
+                lock_owner_id,
+                status.strip(),
+                1 if force_crawl else 0,
+                1 if force_health_check else 0,
+                1 if crawl_due else 0,
+                1 if health_due else 0,
+                json.dumps(metadata_payload, ensure_ascii=False),
+            ),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+
+
+def finish_scheduler_cycle_run(
+    *,
+    cycle_run_id: int,
+    status: str,
+    crawl_success_count: int = 0,
+    crawl_failed_count: int = 0,
+    health_success_count: int = 0,
+    health_failed_count: int = 0,
+    alert_sent: bool = False,
+    alert_error: str | None = None,
+    error: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    db_path: str = DEFAULT_DB_PATH,
+) -> None:
+    if cycle_run_id <= 0:
+        raise ValueError("cycle_run_id must be positive")
+    if not status.strip():
+        raise ValueError("status cannot be empty")
+    init_sqlite_db(db_path=db_path)
+    metadata_payload = metadata or {}
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE scheduler_cycle_runs
+            SET
+                status = ?,
+                crawl_success_count = ?,
+                crawl_failed_count = ?,
+                health_success_count = ?,
+                health_failed_count = ?,
+                alert_sent = ?,
+                alert_error = ?,
+                error = ?,
+                metadata_json = ?,
+                ended_at_utc = datetime('now'),
+                duration_ms = CAST(
+                    (julianday('now') - julianday(started_at_utc)) * 86400000
+                    AS INTEGER
+                )
+            WHERE id = ?
+            """,
+            (
+                status.strip(),
+                max(0, int(crawl_success_count)),
+                max(0, int(crawl_failed_count)),
+                max(0, int(health_success_count)),
+                max(0, int(health_failed_count)),
+                1 if alert_sent else 0,
+                alert_error,
+                error,
+                json.dumps(metadata_payload, ensure_ascii=False),
+                cycle_run_id,
+            ),
+        )
+        conn.commit()
+
+
+def add_scheduler_cycle_run_item(
+    *,
+    cycle_run_id: int,
+    task_type: str,
+    platform: str | None = None,
+    creator_id: str | None = None,
+    creator_url: str | None = None,
+    success: bool,
+    duration_ms: int | None = None,
+    error: str | None = None,
+    details: dict[str, Any] | None = None,
+    db_path: str = DEFAULT_DB_PATH,
+) -> None:
+    if cycle_run_id <= 0:
+        raise ValueError("cycle_run_id must be positive")
+    if not task_type.strip():
+        raise ValueError("task_type cannot be empty")
+    init_sqlite_db(db_path=db_path)
+    details_payload = details or {}
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO scheduler_cycle_run_items (
+                cycle_run_id,
+                task_type,
+                platform,
+                creator_id,
+                creator_url,
+                success,
+                duration_ms,
+                error,
+                details_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                cycle_run_id,
+                task_type.strip(),
+                platform,
+                creator_id,
+                creator_url,
+                1 if success else 0,
+                duration_ms,
+                error,
+                json.dumps(details_payload, ensure_ascii=False),
+            ),
+        )
+        conn.commit()
+
+
+def list_scheduler_cycle_runs(
+    *,
+    db_path: str = DEFAULT_DB_PATH,
+    limit: int = 100,
+    status: str | None = None,
+) -> list[dict[str, Any]]:
+    init_sqlite_db(db_path=db_path)
+    query = """
+        SELECT
+            id,
+            scheduler_name,
+            lock_key,
+            lock_owner_id,
+            status,
+            force_crawl,
+            force_health_check,
+            crawl_due,
+            health_due,
+            crawl_success_count,
+            crawl_failed_count,
+            health_success_count,
+            health_failed_count,
+            alert_sent,
+            alert_error,
+            error,
+            metadata_json,
+            started_at_utc,
+            ended_at_utc,
+            duration_ms
+        FROM scheduler_cycle_runs
+    """
+    params: list[Any] = []
+    if isinstance(status, str) and status.strip():
+        query += " WHERE status = ?"
+        params.append(status.strip())
+    query += " ORDER BY id DESC LIMIT ?"
+    params.append(max(1, int(limit)))
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [
+        {
+            "id": row[0],
+            "scheduler_name": row[1],
+            "lock_key": row[2],
+            "lock_owner_id": row[3],
+            "status": row[4],
+            "force_crawl": bool(row[5]),
+            "force_health_check": bool(row[6]),
+            "crawl_due": bool(row[7]),
+            "health_due": bool(row[8]),
+            "crawl_success_count": row[9],
+            "crawl_failed_count": row[10],
+            "health_success_count": row[11],
+            "health_failed_count": row[12],
+            "alert_sent": bool(row[13]),
+            "alert_error": row[14],
+            "error": row[15],
+            "metadata": _safe_json_object(row[16]),
+            "started_at_utc": row[17],
+            "ended_at_utc": row[18],
+            "duration_ms": row[19],
+        }
+        for row in rows
+    ]
+
+
+def list_scheduler_cycle_run_items(
+    *,
+    db_path: str = DEFAULT_DB_PATH,
+    cycle_run_id: int | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    init_sqlite_db(db_path=db_path)
+    query = """
+        SELECT
+            id,
+            cycle_run_id,
+            task_type,
+            platform,
+            creator_id,
+            creator_url,
+            success,
+            duration_ms,
+            error,
+            details_json,
+            created_at_utc
+        FROM scheduler_cycle_run_items
+    """
+    params: list[Any] = []
+    if cycle_run_id is not None and cycle_run_id > 0:
+        query += " WHERE cycle_run_id = ?"
+        params.append(cycle_run_id)
+    query += " ORDER BY id DESC LIMIT ?"
+    params.append(max(1, int(limit)))
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [
+        {
+            "id": row[0],
+            "cycle_run_id": row[1],
+            "task_type": row[2],
+            "platform": row[3],
+            "creator_id": row[4],
+            "creator_url": row[5],
+            "success": bool(row[6]),
+            "duration_ms": row[7],
+            "error": row[8],
+            "details": _safe_json_object(row[9]),
+            "created_at_utc": row[10],
+        }
+        for row in rows
+    ]
+
+
+def add_admin_action_log(
+    *,
+    actor: str,
+    action: str,
+    success: bool,
+    target_type: str | None = None,
+    target_id: str | None = None,
+    details: dict[str, Any] | None = None,
+    remote_addr: str | None = None,
+    user_agent: str | None = None,
+    db_path: str = DEFAULT_DB_PATH,
+) -> None:
+    if not actor.strip():
+        raise ValueError("actor cannot be empty")
+    if not action.strip():
+        raise ValueError("action cannot be empty")
+    init_sqlite_db(db_path=db_path)
+    details_payload = details or {}
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO admin_action_logs (
+                actor,
+                action,
+                success,
+                target_type,
+                target_id,
+                details_json,
+                remote_addr,
+                user_agent
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                actor.strip(),
+                action.strip(),
+                1 if success else 0,
+                target_type.strip() if isinstance(target_type, str) and target_type.strip() else None,
+                target_id.strip() if isinstance(target_id, str) and target_id.strip() else None,
+                json.dumps(details_payload, ensure_ascii=False),
+                remote_addr,
+                user_agent,
+            ),
+        )
+        conn.commit()
+
+
+def list_admin_action_logs(
+    *,
+    db_path: str = DEFAULT_DB_PATH,
+    limit: int = 200,
+    action: str | None = None,
+    success: bool | None = None,
+) -> list[dict[str, Any]]:
+    init_sqlite_db(db_path=db_path)
+    query = """
+        SELECT
+            id,
+            actor,
+            action,
+            success,
+            target_type,
+            target_id,
+            details_json,
+            remote_addr,
+            user_agent,
+            created_at_utc
+        FROM admin_action_logs
+    """
+    filters: list[str] = []
+    params: list[Any] = []
+    if isinstance(action, str) and action.strip():
+        filters.append("action = ?")
+        params.append(action.strip())
+    if success is not None:
+        filters.append("success = ?")
+        params.append(1 if success else 0)
+    if filters:
+        query += " WHERE " + " AND ".join(filters)
+    query += " ORDER BY id DESC LIMIT ?"
+    params.append(max(1, int(limit)))
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [
+        {
+            "id": row[0],
+            "actor": row[1],
+            "action": row[2],
+            "success": bool(row[3]),
+            "target_type": row[4],
+            "target_id": row[5],
+            "details": _safe_json_object(row[6]),
+            "remote_addr": row[7],
+            "user_agent": row[8],
+            "created_at_utc": row[9],
+        }
+        for row in rows
+    ]
+
+
 def get_crawl_checkpoint(
     *,
     platform: str,
@@ -1559,6 +2131,21 @@ def _stable_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def _safe_json_loads(value: Any) -> Any:
     if not isinstance(value, str):
         return None
@@ -1566,6 +2153,13 @@ def _safe_json_loads(value: Any) -> Any:
         return json.loads(value)
     except json.JSONDecodeError:
         return None
+
+
+def _safe_json_object(value: Any) -> dict[str, Any]:
+    payload = _safe_json_loads(value)
+    if isinstance(payload, dict):
+        return payload
+    return {}
 
 
 def _serialize_diff_result(diff_result: dict[str, Any]) -> dict[str, Any]:

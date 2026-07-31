@@ -15,11 +15,14 @@ This project crawls creator post lists from:
 - Backend creator-id registry (add/list creators)
 - Optional media downloading (images/videos)
 - Built-in admin web page (creator management + crawl runs + diff view)
+- Run-detail export (JSON/CSV) for offline analysis
+- Admin login authentication + action audit log
 - Account pool + proxy pool rotation for anti-bot resilience
 - P0 resilience scheduler: cooldown circuit-breaker + weighted scoring
 - Active pool health check API/admin action for account/proxy probing
 - Health-check history and 24h trend view in admin dashboard
 - Scheduler cycle support with platform-level concurrency limits
+- Scheduler lock + cycle task logs + webhook alerts
 - Procurement reference for proxy vendors and acceptance checklist (`proxy_pool_procurement.md`)
 
 ## Environment
@@ -52,9 +55,12 @@ Then open `http://127.0.0.1:8000` to:
 - manage crawl proxy pool (multi-proxy rotation)
 - run one-click pool health checks (accounts/proxies)
 - run scheduler cycles (independent crawl/health intervals + per-platform concurrency)
+- retry failed crawl tasks from selected scheduler cycle
 - trigger crawl jobs
 - inspect per-run diff summary (`new/updated/missing`)
 - inspect media download status
+- export run detail as JSON/CSV from run detail page
+- inspect recent admin action audit log
 
 ### Synchronous Call
 
@@ -222,6 +228,15 @@ Optional environment variables:
 - `CRAWL_MAX_ITEMS`
 - `CRAWL_USE_ACCOUNT_POOL` / `CRAWL_USE_PROXY_POOL`
 - `HEALTH_TIMEOUT_MS`
+- `SCHEDULER_NAME` (default `crawler-main`)
+- `SCHEDULER_LOCK_KEY` (default `crawler_scheduler_main_lock`)
+- `SCHEDULER_LOCK_LEASE_SECONDS` (default `1800`)
+- `SCHEDULER_LOCK_OWNER_ID` (optional, auto-generated if empty)
+- `SCHEDULER_WEBHOOK_ALERT_URL` (optional, POST JSON webhook)
+- `SCHEDULER_WEBHOOK_ALERT_ON_SUCCESS` (default `false`, only push alert on failure)
+- `SCHEDULER_WEBHOOK_TIMEOUT_SECONDS` (default `8`)
+- `ADMIN_WEB_USERNAME` (default `admin`)
+- `ADMIN_WEB_PASSWORD` (default empty; set non-empty to enable login)
 
 ### Save Existing Payload to SQLite
 
@@ -287,6 +302,10 @@ save_creator_content(payload, db_path="data/crawler.db")
 - Health probe events are persisted in `pool_health_events` and surfaced as 24h trend + recent event tables in admin.
 - Admin health views support platform/type filter, anomaly-only filter, and window switch (24h/72h/7d).
 - Scheduler runtime state is persisted in `scheduler_state` and displayed in the admin scheduler card.
+- Scheduler lock state is persisted in `scheduler_locks` to avoid duplicate scheduler instances.
+- Scheduler cycle headers are persisted in `scheduler_cycle_runs`, and per-task logs are persisted in `scheduler_cycle_run_items`.
+- Admin operations are audited in `admin_action_logs` (actor/action/result/details).
+- When `SCHEDULER_WEBHOOK_ALERT_URL` is configured, scheduler sends webhook alert payloads for failed/abnormal cycles.
 - Diff data for each run is persisted in `crawl_diffs` and `crawl_diff_items`, and also returned in `result["storage"]["diff"]` (`new/updated/unchanged/missing`).
 - For stable production crawling, combine browser automation with request-level API parsing and retry strategy.
 
